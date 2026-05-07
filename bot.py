@@ -176,29 +176,42 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_trade_notification(app, chat_id: str, trade: dict):
-    """Send notification about a new trade to a chat."""
+    """Send notification about a new trade or closed position."""
     market_url = trade.get("market_url", "")
     market_title = trade.get("market_title", "Невідомий ринок")
     outcome = trade.get("outcome", "")
-    side = trade.get("side", "")
-    size = trade.get("size", 0)
-    price = trade.get("price", 0)
     usd_value = trade.get("usd_value", 0)
     trader = trade.get("trader_address", "")
     timestamp = trade.get("timestamp", "")
+    event_type = trade.get("event_type", "open")
 
-    side_emoji = "🟢" if side.upper() == "BUY" else "🔴"
-    side_text = "КУПІВЛЯ" if side.upper() == "BUY" else "ПРОДАЖ"
-
-    text = (
-        f"🔔 *Нова угода!*\n\n"
-        f"👤 Трейдер: `{trader[:10]}...{trader[-6:]}`\n\n"
-        f"📌 *{market_title}*\n\n"
-        f"{side_emoji} *{side_text}* — {outcome}\n"
-        f"💰 Сума: *${usd_value:.2f}*\n"
-        f"📊 Ціна: {price:.3f} | Розмір: {size:.2f}\n"
-        f"🕐 {timestamp}"
-    )
+    if event_type == "close":
+        avg_price = trade.get("avg_price", 0)
+        size = trade.get("size", 0)
+        text = (
+            f"🔕 *Позицію закрито!*\n\n"
+            f"👤 Трейдер: `{trader[:10]}...{trader[-6:]}`\n\n"
+            f"📌 *{market_title}*\n\n"
+            f"❌ Закрито — {outcome}\n"
+            f"💰 Сума: *${usd_value:.2f}*\n"
+            f"📊 Ціна входу: {avg_price:.3f} | Розмір: {size:.2f}\n"
+            f"🕐 {timestamp}"
+        )
+    else:
+        side = trade.get("side", "")
+        size = trade.get("size", 0)
+        price = trade.get("price", 0)
+        side_emoji = "🟢" if side.upper() == "BUY" else "🔴"
+        side_text = "КУПІВЛЯ" if side.upper() == "BUY" else "ПРОДАЖ"
+        text = (
+            f"🔔 *Нова угода!*\n\n"
+            f"👤 Трейдер: `{trader[:10]}...{trader[-6:]}`\n\n"
+            f"📌 *{market_title}*\n\n"
+            f"{side_emoji} *{side_text}* — {outcome}\n"
+            f"💰 Сума: *${usd_value:.2f}*\n"
+            f"📊 Ціна: {price:.3f} | Розмір: {size:.2f}\n"
+            f"🕐 {timestamp}"
+        )
 
     keyboard = []
     if market_url:
