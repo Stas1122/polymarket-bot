@@ -3,15 +3,15 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict
 import aiohttp
 
 logger = logging.getLogger(__name__)
 
 DATA_FILE = "traders.json"
 
-POLYMARKET_CLOB_API = "https://clob.polymarket.com"
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
+POLYMARKET_DATA_API = "https://data-api.polymarket.com"
 
 
 class PolymarketMonitor:
@@ -45,7 +45,6 @@ class PolymarketMonitor:
                 return "exists"
         self.traders[chat_id].append({
             "address": address,
-            "last_trade_timestamp": None,
             "last_trade_ids": [],
             "positions": {}
         })
@@ -66,102 +65,89 @@ class PolymarketMonitor:
     def get_total_traders(self) -> int:
         return sum(len(v) for v in self.traders.values())
 
-    def _update_last_trade(self, chat_id: str, address: str, trade_ids: List[str], timestamp: str):
+    def _update_trader(self, chat_id: str, address: str, trade_ids: List[str], positions: dict):
         if chat_id in self.traders:
             for t in self.traders[chat_id]:
                 if t["address"] == address:
                     t["last_trade_ids"] = trade_ids
-                    t["last_trade_timestamp"] = timestamp
-        self._save()
-
-    def _update_positions(self, chat_id: str, address: str, positions: dict):
-        if chat_id in self.traders:
-            for t in self.traders[chat_id]:
-                if t["address"] == address:
                     t["positions"] = positions
         self._save()
 
-    def _get_positions(self, chat_id: str, address: str) -> dict:
+    def _get_trader_data(self, chat_id: str, address: str):
         if chat_id in self.traders:
             for t in self.traders[chat_id]:
                 if t["address"] == address:
-                    return t.get("positions", {})
-        return {}
+                    return t.get("last_trade_ids", []), t.get("positions", {})
+        return [], {}
 
-    async def fetch_recent_trades(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
+    async def fetch_trades(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
+        """Fetch trades via data-api (no auth required)."""
         try:
-            url = f"{POLYMARKET_CLOB_API}/trades"
-            params = {"maker_address": address, "limit": 20}
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("data", [])
-                else:
-                    logger.warning(f"CLOB API returned {resp.status} for {address}")
-                    return []
-        except Exception as e:
-            logger.error(f"Error fetching trades for {address}: {e}")
-            return []
-
-    async def fetch_open_positions(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
-        try:
-            url = f"{POLYMARKET_GAMMA_API}/positions"
-            params = {"user": address, "sizeThreshold": "0.01"}
+            url = f"{POLYMARKET_DATA_API}/activity"
+            params = {
+                "user": address,
+                "limit": 20,
+                "offset": 0
+            }
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     if isinstance(data, list):
                         return data
-                    return data.get("data", data.get("positions", []))
+                    return data.get("data", [])
                 else:
-                    logger.warning(f"Positions API returned {resp.status} for {address}")
+                    logger.warning(f"data-api activity returned {resp.status} for {address}")
+                    return []
+        except Exception as e:
+            logger.error(f"Error fetching trades for {address}: {e}")
+            return []
+
+    async def fetch_positions(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
+        """Fetch open positions via data-api."""
+        try:
+            url = f"{POLYMARKET_DATA_API}/positions"
+            params = {"user": address, "sizeThreshold": "0.01", "limit": 50}
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if isinstance(data, list):
+                        return data
+                    return data.get("data", [])
+                else:
+                    logger.warning(f"data-api positions returned {resp.status} for {address}")
                     return []
         except Exception as e:
             logger.error(f"Error fetching positions for {address}: {e}")
             return []
 
-    async def fetch_market_info(self, condition_id: str, session: aiohttp.ClientSession) -> Dict:
-        try:
-            url = f"{POLYMARKET_GAMMA_API}/markets"
-            params = {"condition_ids": condition_id}
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    if data and len(data) > 0:
-                        return data[0]
-        except Exception as e:
-            logger.debug(f"Error fetching market info: {e}")
-        return {}
-
-    def _parse_trade(self, raw: Dict, market_info: Dict, trader_address: str) -> Dict:
-        taker_addr = raw.get("taker_address", "").lower()
+    def _parse_activity(self, raw: Dict, trader_address: str) -> Dict:
+        """Parse activity item from data-api."""
+        trade_type = raw.get("type", "").upper()  # BUY / SELL / REDEEM etc.
+        outcome = raw.get("outcome", raw.get("side", ""))
         price = float(raw.get("price", 0))
-        size = float(raw.get("size", 0))
-        usd_value = price * size
+        size = float(raw.get("size", raw.get("shares", 0)))
+        usd_value = float(raw.get("usdcSize", raw.get("amount", price * size)))
 
-        raw_side = raw.get("side", "BUY")
-        if taker_addr == trader_address and raw_side.upper() == "BUY":
-            side = "SELL"
-        elif taker_addr == trader_address and raw_side.upper() == "SELL":
-            side = "BUY"
-        else:
-            side = raw_side
-
-        outcome = raw.get("outcome", "Yes")
-        market_slug = market_info.get("slug", "")
-        market_title = market_info.get("question", market_info.get("title", ""))
+        market_title = raw.get("title", raw.get("market", {}).get("question", ""))
+        market_slug = raw.get("slug", raw.get("market", {}).get("slug", ""))
         market_url = f"https://polymarket.com/event/{market_slug}" if market_slug else ""
 
-        ts_raw = raw.get("match_time", raw.get("created_at", ""))
+        ts_raw = raw.get("timestamp", raw.get("createdAt", raw.get("created_at", "")))
         try:
-            dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+            if isinstance(ts_raw, (int, float)):
+                dt = datetime.fromtimestamp(ts_raw, tz=timezone.utc)
+            else:
+                dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
             timestamp = dt.strftime("%d.%m.%Y %H:%M UTC")
         except Exception:
-            timestamp = ts_raw[:19] if ts_raw else "—"
+            timestamp = str(ts_raw)[:19] if ts_raw else "—"
+
+        side = "BUY" if trade_type in ("BUY", "PURCHASE") else "SELL"
 
         return {
-            "id": raw.get("id", raw.get("trade_id", "")),
+            "id": str(raw.get("id", raw.get("transactionHash", raw.get("txHash", "")))),
             "trader_address": trader_address,
+            "event_type": "open",
             "side": side,
             "outcome": outcome,
             "price": price,
@@ -170,46 +156,43 @@ class PolymarketMonitor:
             "market_title": market_title,
             "market_url": market_url,
             "timestamp": timestamp,
-            "condition_id": raw.get("condition_id", ""),
-            "event_type": "open",
         }
 
-    def _build_position_key(self, condition_id: str, outcome: str) -> str:
-        return f"{condition_id}:{outcome}".lower()
-
-    def _process_positions(self, current_positions: List[Dict]) -> dict:
-        new_positions = {}
-        for pos in current_positions:
-            condition_id = pos.get("conditionId", pos.get("condition_id", ""))
+    def _process_positions(self, positions: List[Dict]) -> dict:
+        result = {}
+        for pos in positions:
+            market_id = str(pos.get("conditionId", pos.get("market", {}).get("conditionId", pos.get("marketId", ""))))
             outcome = str(pos.get("outcome", pos.get("outcomeIndex", "")))
-            size = float(pos.get("size", pos.get("currentValue", 0)))
-            key = self._build_position_key(condition_id, outcome)
+            size = float(pos.get("size", pos.get("currentValue", pos.get("shares", 0))))
+            key = f"{market_id}:{outcome}".lower()
             if size > 0.01:
-                new_positions[key] = {
+                result[key] = {
                     "size": size,
-                    "condition_id": condition_id,
+                    "market_id": market_id,
                     "outcome": outcome,
-                    "market_title": pos.get("title", pos.get("question", "")),
-                    "market_url": pos.get("market_url", ""),
+                    "market_title": pos.get("title", pos.get("market", {}).get("question", "")),
+                    "market_slug": pos.get("slug", pos.get("market", {}).get("slug", "")),
                     "avg_price": float(pos.get("avgPrice", pos.get("price", 0))),
                 }
-        return new_positions
+        return result
 
-    def _detect_closed_positions(self, old_positions: dict, new_positions: dict, address: str) -> List[Dict]:
+    def _detect_closed(self, old: dict, new: dict, address: str) -> List[Dict]:
         closed = []
-        for key, old_pos in old_positions.items():
-            if key not in new_positions:
+        for key, pos in old.items():
+            if key not in new:
+                slug = pos.get("market_slug", "")
+                market_url = f"https://polymarket.com/event/{slug}" if slug else ""
+                usd_value = pos.get("size", 0) * pos.get("avg_price", 0)
                 closed.append({
                     "event_type": "close",
                     "trader_address": address,
-                    "outcome": old_pos.get("outcome", ""),
-                    "size": old_pos.get("size", 0),
-                    "avg_price": old_pos.get("avg_price", 0),
-                    "usd_value": old_pos.get("size", 0) * old_pos.get("avg_price", 0),
-                    "market_title": old_pos.get("market_title", ""),
-                    "market_url": old_pos.get("market_url", ""),
+                    "outcome": pos.get("outcome", ""),
+                    "size": pos.get("size", 0),
+                    "avg_price": pos.get("avg_price", 0),
+                    "usd_value": usd_value,
+                    "market_title": pos.get("market_title", ""),
+                    "market_url": market_url,
                     "timestamp": datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC"),
-                    "condition_id": old_pos.get("condition_id", ""),
                 })
         return closed
 
@@ -223,53 +206,44 @@ class PolymarketMonitor:
             for chat_id, trader_list in self.traders.items():
                 for trader in trader_list:
                     address = trader["address"]
-                    known_ids = set(trader.get("last_trade_ids", []))
+                    known_ids, old_positions = self._get_trader_data(chat_id, address)
+                    known_ids_set = set(known_ids)
 
-                    # --- New trades ---
-                    trades = await self.fetch_recent_trades(address, session)
+                    # --- Fetch trades ---
+                    trades = await self.fetch_trades(address, session)
                     new_trades = []
                     current_ids = []
 
                     for t in trades:
-                        tid = t.get("id", t.get("trade_id", ""))
-                        current_ids.append(tid)
-                        if not known_ids:
+                        tid = str(t.get("id", t.get("transactionHash", t.get("txHash", ""))))
+                        if tid:
+                            current_ids.append(tid)
+                        if not known_ids_set:
                             continue
-                        if tid not in known_ids:
+                        if tid and tid not in known_ids_set:
                             new_trades.append(t)
 
-                    if current_ids:
-                        self._update_last_trade(
-                            chat_id, address, current_ids[:10],
-                            trades[0].get("match_time", "") if trades else ""
-                        )
+                    # --- Fetch positions ---
+                    positions_raw = await self.fetch_positions(address, session)
+                    new_positions = self._process_positions(positions_raw)
 
-                    # Fetch market info for new trades
-                    market_cache = {}
-                    for t in new_trades:
-                        cid = t.get("condition_id", "")
-                        if cid and cid not in market_cache:
-                            market_cache[cid] = await self.fetch_market_info(cid, session)
-                            await asyncio.sleep(0.2)
+                    # --- Detect closed positions ---
+                    closed_events = []
+                    if old_positions:
+                        closed_events = self._detect_closed(old_positions, new_positions, address)
 
+                    # --- Save state ---
+                    self._update_trader(chat_id, address, current_ids[:20], new_positions)
+
+                    # --- Build notifications ---
                     for raw_trade in new_trades:
-                        cid = raw_trade.get("condition_id", "")
-                        parsed = self._parse_trade(raw_trade, market_cache.get(cid, {}), address)
+                        parsed = self._parse_activity(raw_trade, address)
                         notifications.append((chat_id, parsed))
-                        logger.info(f"New trade for {address}: {parsed['id']}")
+                        logger.info(f"New trade for {address}: {parsed['id']} ${parsed['usd_value']:.2f}")
 
-                    # --- Closed positions ---
-                    current_positions = await self.fetch_open_positions(address, session)
-                    new_pos_map = self._process_positions(current_positions)
-                    old_pos_map = self._get_positions(chat_id, address)
-
-                    if old_pos_map:
-                        closed = self._detect_closed_positions(old_pos_map, new_pos_map, address)
-                        for close_event in closed:
-                            notifications.append((chat_id, close_event))
-                            logger.info(f"Position closed for {address}: {close_event['market_title']}")
-
-                    self._update_positions(chat_id, address, new_pos_map)
+                    for close_event in closed_events:
+                        notifications.append((chat_id, close_event))
+                        logger.info(f"Closed position for {address}: {close_event['market_title']}")
 
                     await asyncio.sleep(0.5)
 
