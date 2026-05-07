@@ -248,3 +248,43 @@ class PolymarketMonitor:
                     await asyncio.sleep(0.5)
 
         return notifications
+
+    async def get_positions_report(self, address: str) -> list:
+        """Fetch positions with current price and PnL for hourly report."""
+        async with aiohttp.ClientSession() as session:
+            positions_raw = await self.fetch_positions(address, session)
+
+        result = []
+        for pos in positions_raw:
+            size = float(pos.get("size", pos.get("shares", 0)))
+            if size < 0.01:
+                continue
+
+            avg_price = float(pos.get("avgPrice", pos.get("price", 0)))
+            cur_price = float(pos.get("currentPrice", pos.get("curPrice", avg_price)))
+            current_value = size * cur_price
+            invested = size * avg_price
+            pnl = current_value - invested
+            pnl_pct = (pnl / invested * 100) if invested > 0 else 0
+
+            market_title = pos.get("title", pos.get("question", pos.get("market", {}).get("question", "")))
+            market_slug = pos.get("slug", pos.get("market", {}).get("slug", ""))
+            market_url = f"https://polymarket.com/event/{market_slug}" if market_slug else ""
+            outcome = str(pos.get("outcome", pos.get("outcomeIndex", "")))
+
+            result.append({
+                "market_title": market_title,
+                "market_url": market_url,
+                "outcome": outcome,
+                "size": size,
+                "avg_price": avg_price,
+                "current_price": cur_price,
+                "current_value": current_value,
+                "invested": invested,
+                "pnl": pnl,
+                "pnl_pct": pnl_pct,
+            })
+
+        # Сортуємо по PnL (найбільший зверху)
+        result.sort(key=lambda x: x["pnl"], reverse=True)
+        return result
