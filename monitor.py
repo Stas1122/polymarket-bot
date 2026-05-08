@@ -280,6 +280,11 @@ class PolymarketMonitor:
 
             avg_price = float(pos.get("avgPrice", pos.get("price", 0)))
             cur_price = float(pos.get("currentPrice", pos.get("curPrice", avg_price)))
+
+            # Пропускаємо резолвнуті ринки (ціна = 0, вартість = $0)
+            current_value_check = size * cur_price
+            if cur_price == 0 or current_value_check < 0.01:
+                continue
             current_value = size * cur_price
             invested = size * avg_price
             pnl = current_value - invested
