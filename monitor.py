@@ -36,7 +36,7 @@ class PolymarketMonitor:
         except Exception as e:
             logger.error(f"Failed to save traders: {e}")
 
-    def add_trader(self, chat_id: str, address: str) -> str:
+    def add_trader(self, chat_id: str, address: str, nickname: str = "") -> str:
         address = address.lower()
         if chat_id not in self.traders:
             self.traders[chat_id] = []
@@ -45,11 +45,31 @@ class PolymarketMonitor:
                 return "exists"
         self.traders[chat_id].append({
             "address": address,
+            "nickname": nickname,
             "last_trade_ids": [],
             "positions": {}
         })
         self._save()
         return "added"
+
+    def set_nickname(self, chat_id: str, address: str, nickname: str):
+        address = address.lower()
+        if chat_id in self.traders:
+            for t in self.traders[chat_id]:
+                if t["address"] == address:
+                    t["nickname"] = nickname
+                    self._save()
+                    return True
+        return False
+
+    def get_nickname(self, chat_id: str, address: str) -> str:
+        address = address.lower()
+        if chat_id in self.traders:
+            for t in self.traders[chat_id]:
+                if t["address"] == address:
+                    nick = t.get("nickname", "")
+                    return nick if nick else f"{address[:10]}...{address[-6:]}"
+        return f"{address[:10]}...{address[-6:]}"
 
     def remove_trader(self, chat_id: str, address: str):
         address = address.lower()
@@ -81,14 +101,9 @@ class PolymarketMonitor:
         return [], {}
 
     async def fetch_trades(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
-        """Fetch trades via data-api (no auth required)."""
         try:
             url = f"{POLYMARKET_DATA_API}/activity"
-            params = {
-                "user": address,
-                "limit": 20,
-                "offset": 0
-            }
+            params = {"user": address, "limit": 20, "offset": 0}
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -103,7 +118,6 @@ class PolymarketMonitor:
             return []
 
     async def fetch_positions(self, address: str, session: aiohttp.ClientSession) -> List[Dict]:
-        """Fetch open positions via data-api."""
         try:
             url = f"{POLYMARKET_DATA_API}/positions"
             params = {"user": address, "sizeThreshold": "0.01", "limit": 50}
@@ -121,9 +135,21 @@ class PolymarketMonitor:
             return []
 
     def _parse_activity(self, raw: Dict, trader_address: str) -> Dict:
-        """Parse activity item from data-api."""
-        trade_type = raw.get("type", "").upper()  # BUY / SELL / REDEEM etc.
-        outcome = raw.get("outcome", raw.get("side", ""))
+        """Parse activity — правильно визначаємо купівлю/продаж."""
+        # Polymarket data-api повертає type: "BUY" або "SELL" з точки зору трейдера
+        trade_type = raw.get("type", raw.get("side", "")).upper()
+
+        # BUY/PURCHASE = трейдер купує shares = КУПІВЛЯ
+        # SELL/REDEEM  = трейдер продає shares = ПРОДАЖ
+        if trade_type in ("BUY", "PURCHASE", "BUY_OUTCOME"):
+            side = "BUY"
+        elif trade_type in ("SELL", "REDEEM", "SELL_OUTCOME"):
+            side = "SELL"
+        else:
+            # Якщо тип незрозумілий — дивимось на поле outcome/side
+            side = "BUY"
+
+        outcome = raw.get("outcome", raw.get("outcomeIndex", ""))
         price = float(raw.get("price", 0))
         size = float(raw.get("size", raw.get("shares", 0)))
         usd_value = float(raw.get("usdcSize", raw.get("amount", price * size)))
@@ -142,14 +168,12 @@ class PolymarketMonitor:
         except Exception:
             timestamp = str(ts_raw)[:19] if ts_raw else "—"
 
-        side = "BUY" if trade_type in ("BUY", "PURCHASE") else "SELL"
-
         return {
             "id": str(raw.get("id", raw.get("transactionHash", raw.get("txHash", "")))),
             "trader_address": trader_address,
             "event_type": "open",
             "side": side,
-            "outcome": outcome,
+            "outcome": str(outcome),
             "price": price,
             "size": size,
             "usd_value": usd_value,
@@ -209,7 +233,6 @@ class PolymarketMonitor:
                     known_ids, old_positions = self._get_trader_data(chat_id, address)
                     known_ids_set = set(known_ids)
 
-                    # --- Fetch trades ---
                     trades = await self.fetch_trades(address, session)
                     new_trades = []
                     current_ids = []
@@ -223,19 +246,15 @@ class PolymarketMonitor:
                         if tid and tid not in known_ids_set:
                             new_trades.append(t)
 
-                    # --- Fetch positions ---
                     positions_raw = await self.fetch_positions(address, session)
                     new_positions = self._process_positions(positions_raw)
 
-                    # --- Detect closed positions ---
                     closed_events = []
                     if old_positions:
                         closed_events = self._detect_closed(old_positions, new_positions, address)
 
-                    # --- Save state ---
                     self._update_trader(chat_id, address, current_ids[:20], new_positions)
 
-                    # --- Build notifications ---
                     for raw_trade in new_trades:
                         parsed = self._parse_activity(raw_trade, address)
                         notifications.append((chat_id, parsed))
@@ -250,7 +269,6 @@ class PolymarketMonitor:
         return notifications
 
     async def get_positions_report(self, address: str) -> list:
-        """Fetch positions with current price and PnL for hourly report."""
         async with aiohttp.ClientSession() as session:
             positions_raw = await self.fetch_positions(address, session)
 
@@ -285,6 +303,5 @@ class PolymarketMonitor:
                 "pnl_pct": pnl_pct,
             })
 
-        # Сортуємо по PnL (найбільший зверху)
         result.sort(key=lambda x: x["pnl"], reverse=True)
         return result
