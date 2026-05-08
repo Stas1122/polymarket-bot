@@ -9,30 +9,24 @@ from telegram.ext import (
 )
 from monitor import PolymarketMonitor
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Стани розмови
 WAITING_ADDRESS = 1
 WAITING_NICKNAME = 2
-WAITING_NICKNAME_FOR = 3
+WAITING_TYPE = 3
 
 HOURLY_INTERVAL = 3600
+DAILY_INTERVAL = 86400
 
 monitor = PolymarketMonitor()
-
-# Закріплені повідомлення {chat_id: message_id}
 pinned_messages = {}
 
 
 def main_keyboard():
-    """Головна клавіатура з кнопками внизу."""
     keyboard = [
-        [KeyboardButton("➕ Додати трейдера"), KeyboardButton("📋 Мої трейдери")],
-        [KeyboardButton("📊 Позиції зараз"), KeyboardButton("🏷 Нікнейм")],
+        [KeyboardButton("💼 Мій портфель"), KeyboardButton("👥 Трейдери")],
+        [KeyboardButton("➕ Додати"), KeyboardButton("📋 Список")],
         [KeyboardButton("📈 Статус"), KeyboardButton("❓ Допомога")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -41,43 +35,77 @@ def main_keyboard():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 *Polymarket Trade Monitor*\n\n"
-        "Відстежую угоди трейдерів на Polymarket і надсилаю сповіщення у реальному часі.\n\n"
-        "Використовуй кнопки внизу або команди:\n"
-        "/add · /list · /positions · /nickname · /status"
+        "Відстежую угоди та позиції на Polymarket.\n\n"
+        "💼 *Мій портфель* — твої особисті позиції з PnL\n"
+        "👥 *Трейдери* — позиції тих за ким стежиш\n\n"
+        "Починай з ➕ Додати"
     )
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_keyboard()
-    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📖 *Довідка*\n\n"
-        "➕ *Додати трейдера* — почати відстежувати адресу\n"
-        "📋 *Мої трейдери* — список трейдерів\n"
-        "📊 *Позиції зараз* — відкриті позиції з PnL\n"
-        "🏷 *Нікнейм* — назвати трейдера зручно\n"
-        "📈 *Статус* — чи працює бот\n\n"
-        "🔔 Сповіщення приходять автоматично:\n"
-        "▸ Нова угода — одразу\n"
-        "▸ Закрита позиція — одразу\n"
-        "▸ Звіт по позиціях — щогодини\n\n"
-        "*Де знайти адресу трейдера:*\n"
-        "`polymarket.com/profile/0x...`"
+        "💼 *Мій портфель* — щогодинний звіт по своїх позиціях\n"
+        "👥 *Трейдери* — позиції відстежуваних по запиту\n"
+        "➕ *Додати* — додати свій або чужий акаунт\n"
+        "📋 *Список* — всі акаунти\n\n"
+        "🔔 *Сповіщення:*\n"
+        "▸ Нова угода — одразу (всі акаунти)\n"
+        "▸ Мій портфель — щогодини автоматично\n"
+        "▸ Трейдери — раз на добу або по запиту"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_keyboard())
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("💼 Мій акаунт", callback_data="addtype:own")],
+        [InlineKeyboardButton("👁 Відстежувати трейдера", callback_data="addtype:watch")],
+    ]
     await update.message.reply_text(
-        "📝 Введіть адресу гаманця трейдера:\n\n"
-        "Приклад: `0xd5B86E84Be3bC0BD2D5A3D5f9b3b5a8b3c9e0f1a`\n\n"
-        "або /cancel для скасування",
-        parse_mode="Markdown"
+        "Що хочеш додати?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return WAITING_ADDRESS
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    data = query.data
+
+    if data.startswith("addtype:"):
+        atype = data.split(":")[1]
+        context.user_data["add_type"] = atype
+        label = "свого акаунту" if atype == "own" else "трейдера якого хочеш відстежувати"
+        await query.edit_message_text(
+            f"📝 Введи адресу {label}:\n\n"
+            f"Приклад: `0xd5B86E84Be3bC0BD2D5A3D5f9b3b5a8b3c9e0f1a`",
+            parse_mode="Markdown"
+        )
+        return WAITING_ADDRESS
+
+    elif data.startswith("remove:"):
+        address = data.split(":", 1)[1]
+        monitor.remove_trader(chat_id, address)
+        nick = address[:10] + "..." + address[-6:]
+        await query.edit_message_text(f"✅ Видалено: `{nick}`", parse_mode="Markdown")
+
+    elif data.startswith("setnick:"):
+        address = data.split(":", 1)[1]
+        context.user_data["nick_address"] = address
+        await query.edit_message_text(
+            f"🏷 Введи нікнейм для `{address[:10]}...{address[-6:]}`:",
+            parse_mode="Markdown"
+        )
+
+    elif data == "show_all_positions":
+        address = context.user_data.get("full_positions_address", "")
+        positions = context.user_data.get("full_positions_data", [])
+        if positions and address:
+            bot = query.get_bot() if hasattr(query, 'get_bot') else update.get_bot()
+            await send_positions_report(bot, chat_id, address, positions, show_all=True)
 
 
 async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -85,28 +113,21 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not address.startswith("0x") or len(address) != 42:
         await update.message.reply_text(
-            "❌ Невірний формат. Адреса починається з `0x` і має 42 символи.\n"
-            "Спробуйте ще раз або /cancel",
+            "❌ Невірний формат. Адреса починається з `0x` і має 42 символи.\nСпробуй ще раз:",
             parse_mode="Markdown"
         )
         return WAITING_ADDRESS
 
-    chat_id = str(update.effective_chat.id)
-    result = monitor.add_trader(chat_id, address)
-
-    if result == "exists":
-        await update.message.reply_text(
-            f"ℹ️ Трейдер вже відстежується.",
-            reply_markup=main_keyboard()
-        )
-        return ConversationHandler.END
-
     context.user_data["new_address"] = address
+    is_own = context.user_data.get("add_type", "watch") == "own"
+    context.user_data["is_own"] = is_own
+
+    label = "свій акаунт" if is_own else "трейдера"
     await update.message.reply_text(
-        f"✅ Адресу додано!\n\n"
-        f"Хочеш дати нікнейм цьому трейдеру?\n"
-        f"Наприклад: *Кит №1*, *Мій акаунт*, *Друг*\n\n"
-        f"Введи нікнейм або натисни /skip щоб пропустити",
+        f"✅ Адресу отримано!\n\n"
+        f"Дай нікнейм для цього {label}?\n"
+        f"Наприклад: {'Мій акаунт' if is_own else 'Кит №1'}\n\n"
+        f"Або /skip щоб пропустити",
         parse_mode="Markdown"
     )
     return WAITING_NICKNAME
@@ -115,33 +136,39 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def receive_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     address = context.user_data.get("new_address", "")
+    is_own = context.user_data.get("is_own", False)
     nickname = update.message.text.strip()
 
-    if address:
-        monitor.set_nickname(chat_id, address, nickname)
+    monitor.add_trader(chat_id, address, nickname=nickname, is_own=is_own)
 
-    short = f"{address[:10]}...{address[-6:]}"
+    type_label = "💼 Твій акаунт" if is_own else "👁 Відстежуваний трейдер"
+    report_label = "Щогодинний звіт по позиціях" if is_own else "Звіт по запиту або раз на добу"
+
     await update.message.reply_text(
-        f"✅ Трейдера додано!\n\n"
-        f"📍 `{short}`\n"
-        f"🏷 Нікнейм: *{nickname}*\n"
-        f"🟢 Моніторинг активний\n\n"
-        f"Сповіщення: нові угоди + щогодинний звіт.",
+        f"✅ Додано!\n\n"
+        f"{type_label}\n"
+        f"🏷 {nickname}\n"
+        f"📍 `{address[:10]}...{address[-6:]}`\n\n"
+        f"🔔 Нові угоди — одразу\n"
+        f"📊 {report_label}",
         parse_mode="Markdown",
         reply_markup=main_keyboard()
     )
-    logger.info(f"Added trader {address} with nickname '{nickname}' for chat {chat_id}")
     return ConversationHandler.END
 
 
 async def skip_nickname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     address = context.user_data.get("new_address", "")
-    short = f"{address[:10]}...{address[-6:]}"
+    is_own = context.user_data.get("is_own", False)
+
+    monitor.add_trader(chat_id, address, is_own=is_own)
+    type_label = "💼 Твій акаунт" if is_own else "👁 Відстежуваний трейдер"
 
     await update.message.reply_text(
-        f"✅ Трейдера додано!\n\n"
-        f"📍 `{short}`\n"
+        f"✅ Додано!\n\n"
+        f"{type_label}\n"
+        f"📍 `{address[:10]}...{address[-6:]}`\n"
         f"🟢 Моніторинг активний",
         parse_mode="Markdown",
         reply_markup=main_keyboard()
@@ -154,162 +181,126 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def my_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Мій портфель' — показує власні акаунти."""
     chat_id = str(update.effective_chat.id)
-    traders = monitor.get_traders(chat_id)
+    own = monitor.get_own_accounts(chat_id)
 
-    if not traders:
+    if not own:
         await update.message.reply_text(
-            "📋 Список порожній.\n\nДодай трейдера через ➕",
+            "💼 Свого акаунту ще немає.\n\nДодай через ➕ Додати → 💼 Мій акаунт",
             reply_markup=main_keyboard()
         )
         return
 
-    lines = ["📋 *Трейдери під моніторингом:*\n"]
-    for i, trader in enumerate(traders, 1):
-        addr = trader["address"]
-        nick = trader.get("nickname", "")
-        short = f"`{addr[:10]}...{addr[-6:]}`"
-        if nick:
-            lines.append(f"{i}. {short} — *{nick}*")
-        else:
-            lines.append(f"{i}. {short}")
-
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown", reply_markup=main_keyboard())
-
-
-async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    traders = monitor.get_traders(chat_id)
-
-    if not traders:
-        await update.message.reply_text("📋 Список порожній.", reply_markup=main_keyboard())
-        return
-
-    keyboard = []
-    for trader in traders:
-        addr = trader["address"]
-        nick = trader.get("nickname", "")
-        label = nick if nick else f"{addr[:10]}...{addr[-6:]}"
-        keyboard.append([InlineKeyboardButton(f"🗑 {label}", callback_data=f"remove:{addr}")])
-
-    await update.message.reply_text(
-        "Оберіть трейдера для видалення:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def nickname_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    traders = monitor.get_traders(chat_id)
-
-    if not traders:
-        await update.message.reply_text("📋 Список порожній.", reply_markup=main_keyboard())
-        return
-
-    keyboard = []
-    for trader in traders:
-        addr = trader["address"]
-        nick = trader.get("nickname", "")
-        label = nick if nick else f"{addr[:10]}...{addr[-6:]}"
-        keyboard.append([InlineKeyboardButton(f"🏷 {label}", callback_data=f"setnick:{addr}")])
-
-    await update.message.reply_text(
-        "Оберіть трейдера для зміни нікнейму:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    chat_id = str(query.message.chat_id)
-    data = query.data
-
-    if data.startswith("remove:"):
-        address = data.split(":", 1)[1]
-        monitor.remove_trader(chat_id, address)
-        nick = monitor.get_nickname(chat_id, address)
-        await query.edit_message_text(f"✅ Трейдера *{nick}* видалено.", parse_mode="Markdown")
-
-    elif data.startswith("setnick:"):
-        address = data.split(":", 1)[1]
-        context.user_data["nick_address"] = address
-        await query.edit_message_text(
-            f"🏷 Введіть новий нікнейм для `{address[:10]}...{address[-6:]}`:",
-            parse_mode="Markdown"
-        )
-        return WAITING_NICKNAME_FOR
-
-    elif data == "show_all_positions":
-        # Кнопка "показати всі позиції" — надсилаємо повний звіт
-        address = context.user_data.get("full_positions_address", "")
-        positions = context.user_data.get("full_positions_data", [])
-        if positions and address:
-            await send_positions_report(
-                query.message.get_bot() if hasattr(query.message, 'get_bot') else update.get_bot(),
-                chat_id, address, positions, show_all=True
-            )
-
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    traders = monitor.get_traders(chat_id)
-    total = monitor.get_total_traders()
-
-    await update.message.reply_text(
-        f"📈 *Статус моніторингу*\n\n"
-        f"🟢 Бот активний\n"
-        f"👤 Ваших трейдерів: *{len(traders)}*\n"
-        f"🌐 Всього трейдерів у боті: *{total}*\n"
-        f"⏱ Перевірка угод: кожні 30 сек\n"
-        f"📊 Звіт позицій: щогодини",
-        parse_mode="Markdown",
-        reply_markup=main_keyboard()
-    )
-
-
-async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    traders = monitor.get_traders(chat_id)
-
-    if not traders:
-        await update.message.reply_text(
-            "📋 Список порожній. Додай трейдера через ➕",
-            reply_markup=main_keyboard()
-        )
-        return
-
-    msg = await update.message.reply_text("⏳ Завантажую позиції...")
-
+    msg = await update.message.reply_text("⏳ Завантажую портфель...")
     bot = update.get_bot()
-    for trader in traders:
-        address = trader["address"]
-        positions = await monitor.get_positions_report(address)
-        await send_positions_report(bot, chat_id, address, positions, context=context)
-
+    for trader in own:
+        positions = await monitor.get_positions_report(trader["address"])
+        await send_positions_report(bot, chat_id, trader["address"], positions, context=context)
     try:
         await msg.delete()
     except Exception:
         pass
 
 
-async def send_positions_report(bot, chat_id: str, address: str, positions: list, show_all: bool = False, context=None):
-    """Надсилає звіт по позиціях. Якщо >5 — показує кнопку 'Показати всі'."""
+async def watched_traders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Кнопка 'Трейдери' — показує відстежуваних."""
+    chat_id = str(update.effective_chat.id)
+    watched = monitor.get_watched_traders(chat_id)
+
+    if not watched:
+        await update.message.reply_text(
+            "👥 Ще нікого не відстежуєш.\n\nДодай через ➕ Додати → 👁 Відстежувати трейдера",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    # Показуємо список з кнопками для перегляду позицій
+    keyboard = []
+    for t in watched:
+        nick = t.get("nickname") or f"{t['address'][:10]}...{t['address'][-6:]}"
+        keyboard.append([InlineKeyboardButton(
+            f"📊 {nick}",
+            callback_data=f"viewpos:{t['address']}"
+        )])
+
+    await update.message.reply_text(
+        "👥 *Відстежувані трейдери*\n\nОбери чиї позиції показати:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    own = monitor.get_own_accounts(chat_id)
+    watched = monitor.get_watched_traders(chat_id)
+
+    if not own and not watched:
+        await update.message.reply_text("📋 Список порожній. Додай через ➕", reply_markup=main_keyboard())
+        return
+
+    lines = ["📋 *Всі акаунти:*\n"]
+
+    if own:
+        lines.append("💼 *Мої акаунти:*")
+        for t in own:
+            nick = t.get("nickname", "")
+            addr = f"`{t['address'][:10]}...{t['address'][-6:]}`"
+            lines.append(f"  • {addr}" + (f" — *{nick}*" if nick else ""))
+
+    if watched:
+        lines.append("\n👥 *Відстежувані:*")
+        for t in watched:
+            nick = t.get("nickname", "")
+            addr = f"`{t['address'][:10]}...{t['address'][-6:]}`"
+            lines.append(f"  • {addr}" + (f" — *{nick}*" if nick else ""))
+
+    # Кнопка видалення
+    keyboard = []
+    for t in own + watched:
+        nick = t.get("nickname") or f"{t['address'][:10]}...{t['address'][-6:]}"
+        icon = "💼" if t.get("is_own") else "👁"
+        keyboard.append([InlineKeyboardButton(f"🗑 {icon} {nick}", callback_data=f"remove:{t['address']}")])
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
+    )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    own = monitor.get_own_accounts(chat_id)
+    watched = monitor.get_watched_traders(chat_id)
+
+    await update.message.reply_text(
+        f"📈 *Статус*\n\n"
+        f"🟢 Бот активний\n"
+        f"💼 Моїх акаунтів: *{len(own)}*\n"
+        f"👥 Відстежуваних: *{len(watched)}*\n\n"
+        f"⏱ Перевірка угод: кожні 30 сек\n"
+        f"💼 Мій портфель: щогодини\n"
+        f"👥 Трейдери: раз на добу",
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
+
+
+async def send_positions_report(bot, chat_id: str, address: str, positions: list,
+                                 show_all: bool = False, context=None):
     nick = monitor.get_nickname(chat_id, address)
     now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     MAX_SHOW = 5
 
     if not positions:
-        text = (
-            f"📊 *Позиції — {nick}*\n"
-            f"🕐 {now}\n\n"
-            f"— Відкритих позицій немає"
+        await bot.send_message(
+            chat_id=int(chat_id),
+            text=f"📊 *{nick}*\n🕐 {now}\n\n— Відкритих позицій немає",
+            parse_mode="Markdown"
         )
-        try:
-            await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Failed to send positions report: {e}")
         return
 
     total_value = sum(p.get("current_value", 0) for p in positions)
@@ -320,18 +311,17 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
     pnl_sign = "+" if total_pnl >= 0 else ""
 
     lines = [
-        f"📊 *Позиції — {nick}*",
+        f"📊 *{nick}*",
         f"🕐 {now}",
         f"",
-        f"💼 Позицій: *{len(positions)}*  |  💰 Вартість: *${total_value:.2f}*",
+        f"💼 {len(positions)} позицій  |  💰 ${total_value:.2f}",
         f"{pnl_emoji} PnL: *{pnl_sign}${total_pnl:.2f}* ({pnl_sign}{total_pnl_pct:.1f}%)",
         f"",
         f"─────────────────",
     ]
 
-    show_positions = positions if show_all else positions[:MAX_SHOW]
-
-    for i, pos in enumerate(show_positions, 1):
+    show_list = positions if show_all else positions[:MAX_SHOW]
+    for i, pos in enumerate(show_list, 1):
         title = pos.get("market_title", "—")
         title = title[:45] + "..." if len(title) > 45 else title
         outcome = pos.get("outcome", "")
@@ -351,8 +341,6 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
             lines.append(f"   [🔗 Відкрити]({market_url})")
 
     text = "\n".join(lines)
-
-    # Кнопка "Показати всі" якщо є ще позиції
     keyboard = []
     remaining = len(positions) - MAX_SHOW
     if not show_all and remaining > 0:
@@ -365,16 +353,15 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         )])
 
     try:
-        sent = await bot.send_message(
+        await bot.send_message(
             chat_id=int(chat_id),
             text=text,
             parse_mode="Markdown",
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
         )
-        return sent
     except Exception as e:
-        logger.error(f"Failed to send positions report to {chat_id}: {e}")
+        logger.error(f"Failed to send positions report: {e}")
 
 
 async def send_trade_notification(bot, chat_id: str, trade: dict):
@@ -387,12 +374,19 @@ async def send_trade_notification(bot, chat_id: str, trade: dict):
     event_type = trade.get("event_type", "open")
     nick = monitor.get_nickname(chat_id, trader)
 
+    # Визначаємо чи це свій акаунт
+    is_own = any(
+        t.get("is_own") and t["address"] == trader.lower()
+        for t in monitor.get_traders(chat_id)
+    )
+    account_label = "💼 Мій акаунт" if is_own else f"👁 {nick}"
+
     if event_type == "close":
         avg_price = trade.get("avg_price", 0)
         size = trade.get("size", 0)
         text = (
             f"🔕 *Позицію закрито!*\n\n"
-            f"👤 {nick}\n\n"
+            f"{account_label}\n\n"
             f"📌 *{market_title}*\n\n"
             f"❌ Продаж — {outcome}\n"
             f"💰 Сума: *${usd_value:.2f}*\n"
@@ -403,12 +397,11 @@ async def send_trade_notification(bot, chat_id: str, trade: dict):
         side = trade.get("side", "BUY")
         size = trade.get("size", 0)
         price = trade.get("price", 0)
-        # BUY = купівля (відкриття), SELL = продаж (закриття через activity)
         side_emoji = "🟢" if side == "BUY" else "🔴"
         side_text = "КУПІВЛЯ" if side == "BUY" else "ПРОДАЖ"
         text = (
             f"🔔 *Нова угода!*\n\n"
-            f"👤 {nick}\n\n"
+            f"{account_label}\n\n"
             f"📌 *{market_title}*\n\n"
             f"{side_emoji} *{side_text}* — {outcome}\n"
             f"💰 Сума: *${usd_value:.2f}*\n"
@@ -428,119 +421,74 @@ async def send_trade_notification(bot, chat_id: str, trade: dict):
             reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
         )
     except Exception as e:
-        logger.error(f"Failed to send notification to {chat_id}: {e}")
+        logger.error(f"Failed to send notification: {e}")
+
+
+async def handle_view_positions_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє натискання кнопки перегляду позицій трейдера."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    data = query.data
+
+    if data.startswith("viewpos:"):
+        address = data.split(":", 1)[1]
+        await query.edit_message_text("⏳ Завантажую позиції...")
+        positions = await monitor.get_positions_report(address)
+        bot = update.get_bot()
+        await send_positions_report(bot, chat_id, address, positions, context=context)
 
 
 async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник кнопок Reply Keyboard."""
     text = update.message.text
-
-    if text == "➕ Додати трейдера":
-        return await add_command(update, context)
-    elif text == "📋 Мої трейдери":
+    if text == "💼 Мій портфель":
+        await my_portfolio(update, context)
+    elif text == "👥 Трейдери":
+        await watched_traders(update, context)
+    elif text == "➕ Додати":
+        await add_command(update, context)
+        return WAITING_ADDRESS
+    elif text == "📋 Список":
         await list_command(update, context)
-    elif text == "📊 Позиції зараз":
-        await positions_command(update, context)
-    elif text == "🏷 Нікнейм":
-        await nickname_command(update, context)
     elif text == "📈 Статус":
         await status_command(update, context)
     elif text == "❓ Допомога":
         await help_command(update, context)
 
 
-async def update_pinned_positions(app):
-    """Оновлює або створює закріплене повідомлення зі зведенням позицій."""
-    for chat_id, trader_list in monitor.traders.items():
-        if not trader_list:
-            continue
-
-        # Збираємо зведення по всіх трейдерах
-        total_value = 0
-        total_pnl = 0
-        trader_lines = []
-        now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
-
-        for trader in trader_list:
-            address = trader["address"]
-            nick = monitor.get_nickname(chat_id, address)
-            positions = await monitor.get_positions_report(address)
-
-            val = sum(p.get("current_value", 0) for p in positions)
-            pnl = sum(p.get("pnl", 0) for p in positions)
-            invested = sum(p.get("invested", 0) for p in positions)
-            pnl_pct = (pnl / invested * 100) if invested > 0 else 0
-            total_value += val
-            total_pnl += pnl
-
-            p_emoji = "🟢" if pnl >= 0 else "🔴"
-            p_sign = "+" if pnl >= 0 else ""
-            trader_lines.append(
-                f"👤 *{nick}*\n"
-                f"   💰 ${val:.2f}  {p_emoji} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)\n"
-                f"   📌 Позицій: {len(positions)}"
-            )
-
-        overall_sign = "+" if total_pnl >= 0 else ""
-        overall_emoji = "🟢" if total_pnl >= 0 else "🔴"
-
-        pin_text = (
-            f"📌 *Зведення позицій*\n"
-            f"🕐 {now}\n\n"
-            f"💼 Загальна вартість: *${total_value:.2f}*\n"
-            f"{overall_emoji} Загальний PnL: *{overall_sign}${total_pnl:.2f}*\n\n"
-            + "\n\n".join(trader_lines) +
-            f"\n\n_Оновлюється щогодини_"
-        )
-
-        try:
-            if chat_id in pinned_messages:
-                # Редагуємо існуюче повідомлення
-                try:
-                    await app.bot.edit_message_text(
-                        chat_id=int(chat_id),
-                        message_id=pinned_messages[chat_id],
-                        text=pin_text,
-                        parse_mode="Markdown"
-                    )
-                    logger.info(f"Updated pinned message for {chat_id}")
-                    continue
-                except Exception:
-                    pass  # Якщо не вдалось редагувати — створюємо нове
-
-            # Надсилаємо нове і закріплюємо
-            msg = await app.bot.send_message(
-                chat_id=int(chat_id),
-                text=pin_text,
-                parse_mode="Markdown"
-            )
-            pinned_messages[chat_id] = msg.message_id
-            await app.bot.pin_chat_message(
-                chat_id=int(chat_id),
-                message_id=msg.message_id,
-                disable_notification=True
-            )
-            logger.info(f"Pinned new positions message for {chat_id}")
-
-        except Exception as e:
-            logger.error(f"Failed to update pinned message for {chat_id}: {e}")
-
-
 async def run_monitor_loop(app):
     logger.info("Monitor loop started")
-    last_report_time = 0
+    last_hourly = 0
+    last_daily = 0
 
     while True:
         try:
+            # Нові угоди — кожні 30 сек
             new_trades = await monitor.check_new_trades()
             for chat_id, trade in new_trades:
                 await send_trade_notification(app.bot, chat_id, trade)
 
             now = asyncio.get_event_loop().time()
-            if now - last_report_time >= HOURLY_INTERVAL:
-                last_report_time = now
-                logger.info("Hourly report + pinned update...")
-                await update_pinned_positions(app)
+
+            # Мій портфель — щогодини
+            if now - last_hourly >= HOURLY_INTERVAL:
+                last_hourly = now
+                logger.info("Hourly: sending own accounts report...")
+                for chat_id, trader_list in monitor.traders.items():
+                    for trader in trader_list:
+                        if trader.get("is_own"):
+                            positions = await monitor.get_positions_report(trader["address"])
+                            await send_positions_report(app.bot, chat_id, trader["address"], positions)
+
+            # Відстежувані трейдери — раз на добу
+            if now - last_daily >= DAILY_INTERVAL:
+                last_daily = now
+                logger.info("Daily: sending watched traders report...")
+                for chat_id, trader_list in monitor.traders.items():
+                    for trader in trader_list:
+                        if not trader.get("is_own"):
+                            positions = await monitor.get_positions_report(trader["address"])
+                            await send_positions_report(app.bot, chat_id, trader["address"], positions)
 
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
@@ -558,7 +506,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("add", add_command),
-            MessageHandler(filters.Regex("^➕ Додати трейдера$"), add_command),
+            MessageHandler(filters.Regex("^➕ Додати$"), add_command),
         ],
         states={
             WAITING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_address)],
@@ -573,14 +521,12 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
-    app.add_handler(CommandHandler("remove", remove_command))
     app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("positions", positions_command))
-    app.add_handler(CommandHandler("nickname", nickname_command))
     app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(handle_view_positions_callback, pattern="^viewpos:"))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex("^(📋|📊|🏷|📈|❓)"),
+        filters.TEXT & ~filters.COMMAND,
         handle_keyboard_buttons
     ))
 
@@ -588,7 +534,6 @@ def main():
         asyncio.create_task(run_monitor_loop(application))
 
     app.post_init = post_init
-
     logger.info("Bot starting...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
