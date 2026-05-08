@@ -59,14 +59,38 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("💼 Мій акаунт", callback_data="addtype:own")],
-        [InlineKeyboardButton("👁 Відстежувати трейдера", callback_data="addtype:watch")],
-    ]
+    keyboard = ReplyKeyboardMarkup([
+        [KeyboardButton("💼 Мій акаунт"), KeyboardButton("👁 Відстежувати трейдера")],
+        [KeyboardButton("❌ Скасувати")],
+    ], resize_keyboard=True)
     await update.message.reply_text(
         "Що хочеш додати?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=keyboard
     )
+    return WAITING_TYPE
+
+
+async def receive_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "❌ Скасувати":
+        await update.message.reply_text("❌ Скасовано.", reply_markup=main_keyboard())
+        return ConversationHandler.END
+
+    if text == "💼 Мій акаунт":
+        context.user_data["add_type"] = "own"
+        label = "свого акаунту"
+    else:
+        context.user_data["add_type"] = "watch"
+        label = "трейдера якого хочеш відстежувати"
+
+    await update.message.reply_text(
+        f"📝 Введи адресу {label}:\n\n"
+        f"Приклад: `0xd5B86E84Be3bC0BD2D5A3D5f9b3b5a8b3c9e0f1a`\n\n"
+        f"або /cancel для скасування",
+        parse_mode="Markdown"
+    )
+    return WAITING_ADDRESS
+
 
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,18 +99,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(query.message.chat_id)
     data = query.data
 
-    if data.startswith("addtype:"):
-        atype = data.split(":")[1]
-        context.user_data["add_type"] = atype
-        label = "свого акаунту" if atype == "own" else "трейдера якого хочеш відстежувати"
-        await query.edit_message_text(
-            f"📝 Введи адресу {label}:\n\n"
-            f"Приклад: `0xd5B86E84Be3bC0BD2D5A3D5f9b3b5a8b3c9e0f1a`",
-            parse_mode="Markdown"
-        )
-        return WAITING_ADDRESS
-
-    elif data.startswith("remove:"):
+    if data.startswith("remove:"):
         address = data.split(":", 1)[1]
         monitor.remove_trader(chat_id, address)
         nick = address[:10] + "..." + address[-6:]
@@ -509,6 +522,7 @@ def main():
             MessageHandler(filters.Regex("^➕ Додати$"), add_command),
         ],
         states={
+            WAITING_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_type)],
             WAITING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_address)],
             WAITING_NICKNAME: [
                 CommandHandler("skip", skip_nickname),
