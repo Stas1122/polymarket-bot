@@ -495,6 +495,38 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         await help_command(update, context)
 
 
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показує сирі типи транзакцій з API для дебагу PnL."""
+    chat_id = str(update.effective_chat.id)
+    own = monitor.get_own_accounts(chat_id)
+    if not own:
+        await update.message.reply_text("Немає свого акаунту.")
+        return
+
+    address = own[0]["address"]
+    await update.message.reply_text("⏳ Завантажую дані...")
+
+    import aiohttp
+    async with aiohttp.ClientSession() as session:
+        trades = await monitor.fetch_all_activity(address, session, limit=50)
+
+    # Рахуємо унікальні типи
+    types = {}
+    for t in trades:
+        tp = t.get("type", t.get("side", "UNKNOWN")).upper()
+        usd = float(t.get("usdcSize", t.get("amount", 0)))
+        if tp not in types:
+            types[tp] = {"count": 0, "total": 0}
+        types[tp]["count"] += 1
+        types[tp]["total"] += usd
+
+    lines = [f"🔍 *Типи транзакцій (останні 50):*\n"]
+    for tp, data in sorted(types.items()):
+        lines.append(f"`{tp}` — {data['count']} шт, ${data['total']:.2f}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def run_monitor_loop(app):
     logger.info("Monitor loop started")
     last_hourly = 0
@@ -559,6 +591,7 @@ def main():
     )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("status", status_command))
