@@ -325,18 +325,31 @@ class PolymarketMonitor:
             return datetime.now(timezone.utc)
 
     def _calc_trade_pnl(self, trade: Dict) -> float:
-        """Calculate PnL contribution of a single closed trade."""
-        trade_type = trade.get("type", trade.get("side", "")).upper()
-        price = float(trade.get("price", 0))
-        size = float(trade.get("size", trade.get("shares", 0)))
-        usd = float(trade.get("usdcSize", trade.get("amount", price * size)))
+        """
+        Calculate PnL contribution of a single trade.
+        Типи: TRADE (купівля/продаж), REDEEM (виплата виграшу)
+        Ігноруємо: YIELD, DEPOSIT, WITHDRAWAL та інше
+        """
+        trade_type = trade.get("type", "").upper()
 
-        # SELL або REDEEM = отримали гроші назад
-        # BUY = витратили гроші
-        if trade_type in ("SELL", "REDEEM", "SELL_OUTCOME"):
-            return usd   # отримали
-        elif trade_type in ("BUY", "PURCHASE", "BUY_OUTCOME"):
-            return -usd  # витратили
+        # Ігноруємо все крім торгових операцій
+        if trade_type not in ("TRADE", "REDEEM"):
+            return 0
+
+        usd = float(trade.get("usdcSize", trade.get("amount", 0)))
+
+        if trade_type == "REDEEM":
+            # Виплата виграшу = отримали гроші
+            return usd
+
+        if trade_type == "TRADE":
+            # Для TRADE дивимось side: BUY = витратили, SELL = отримали
+            side = trade.get("side", trade.get("tradeType", "")).upper()
+            if side in ("SELL", "SELL_OUTCOME"):
+                return usd   # отримали
+            elif side in ("BUY", "BUY_OUTCOME"):
+                return -usd  # витратили
+
         return 0
 
     async def get_pnl_stats(self, address: str) -> dict:
@@ -355,14 +368,17 @@ class PolymarketMonitor:
         pnl_month = 0.0
 
         for trade in all_activity:
-            trade_type = trade.get("type", trade.get("side", "")).upper()
-            # Рахуємо тільки закриті угоди (SELL/REDEEM)
-            if trade_type not in ("SELL", "REDEEM", "SELL_OUTCOME", "BUY", "PURCHASE", "BUY_OUTCOME"):
+            trade_type = trade.get("type", "").upper()
+            # Рахуємо тільки TRADE і REDEEM, решту ігноруємо
+            if trade_type not in ("TRADE", "REDEEM"):
+                continue
+
+            contribution = self._calc_trade_pnl(trade)
+            if contribution == 0:
                 continue
 
             ts_raw = trade.get("timestamp", trade.get("createdAt", trade.get("created_at", "")))
             trade_dt = self._parse_timestamp(ts_raw)
-            contribution = self._calc_trade_pnl(trade)
 
             pnl_alltime += contribution
             if trade_dt >= month_start:
