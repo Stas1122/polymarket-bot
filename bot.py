@@ -209,8 +209,12 @@ async def my_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Завантажую портфель...")
     bot = update.get_bot()
     for trader in own:
-        positions = await monitor.get_positions_report(trader["address"])
-        await send_positions_report(bot, chat_id, trader["address"], positions, context=context)
+        address = trader["address"]
+        positions, pnl_stats = await asyncio.gather(
+            monitor.get_positions_report(address),
+            monitor.get_pnl_stats(address)
+        )
+        await send_positions_report(bot, chat_id, address, positions, context=context, pnl_stats=pnl_stats)
     try:
         await msg.delete()
     except Exception:
@@ -303,17 +307,26 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def send_positions_report(bot, chat_id: str, address: str, positions: list,
-                                 show_all: bool = False, context=None):
+                                 show_all: bool = False, context=None, pnl_stats: dict = None):
     nick = monitor.get_nickname(chat_id, address)
     now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
     MAX_SHOW = 5
 
     if not positions:
-        await bot.send_message(
-            chat_id=int(chat_id),
-            text=f"📊 *{nick}*\n🕐 {now}\n\n— Відкритих позицій немає",
-            parse_mode="Markdown"
-        )
+        text = f"📊 *{nick}*\n🕐 {now}\n\n— Відкритих позицій немає"
+        if pnl_stats:
+            m_pnl = pnl_stats["pnl_month"]
+            a_pnl = pnl_stats["pnl_alltime"]
+            m_sign = "+" if m_pnl >= 0 else ""
+            a_sign = "+" if a_pnl >= 0 else ""
+            m_emoji = "🟢" if m_pnl >= 0 else "🔴"
+            a_emoji = "🟢" if a_pnl >= 0 else "🔴"
+            text += (
+                f"\n\n📊 *Profit/Loss:*\n"
+                f"{m_emoji} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*\n"
+                f"{a_emoji} За весь час: *{a_sign}${a_pnl:.2f}*"
+            )
+        await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
         return
 
     total_value = sum(p.get("current_value", 0) for p in positions)
@@ -328,7 +341,20 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         f"🕐 {now}",
         f"",
         f"💼 {len(positions)} позицій  |  💰 ${total_value:.2f}",
-        f"{pnl_emoji} PnL: *{pnl_sign}${total_pnl:.2f}* ({pnl_sign}{total_pnl_pct:.1f}%)",
+        f"{pnl_emoji} PnL відкритих: *{pnl_sign}${total_pnl:.2f}* ({pnl_sign}{total_pnl_pct:.1f}%)",
+    ]
+
+    if pnl_stats:
+        m_pnl = pnl_stats["pnl_month"]
+        a_pnl = pnl_stats["pnl_alltime"]
+        m_sign = "+" if m_pnl >= 0 else ""
+        a_sign = "+" if a_pnl >= 0 else ""
+        m_emoji = "🟢" if m_pnl >= 0 else "🔴"
+        a_emoji = "🟢" if a_pnl >= 0 else "🔴"
+        lines.append(f"{m_emoji} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*")
+        lines.append(f"{a_emoji} За весь час: *{a_sign}${a_pnl:.2f}*")
+
+    lines += [
         f"",
         f"─────────────────",
     ]
