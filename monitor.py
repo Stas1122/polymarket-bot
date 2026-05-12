@@ -289,3 +289,105 @@ class PolymarketMonitor:
             })
         result.sort(key=lambda x: x["pnl"], reverse=True)
         return result
+
+    async def fetch_all_activity(self, address: str, session: aiohttp.ClientSession, limit: int = 500) -> List[Dict]:
+        """Fetch full activity history for PnL calculation."""
+        all_trades = []
+        offset = 0
+        batch = 100
+        while offset < limit:
+            try:
+                url = f"{POLYMARKET_DATA_API}/activity"
+                params = {"user": address, "limit": batch, "offset": offset}
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                    if resp.status != 200:
+                        break
+                    data = await resp.json()
+                    batch_data = data if isinstance(data, list) else data.get("data", [])
+                    if not batch_data:
+                        break
+                    all_trades.extend(batch_data)
+                    if len(batch_data) < batch:
+                        break
+                    offset += batch
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.error(f"Error fetching activity batch: {e}")
+                break
+        return all_trades
+
+    def _parse_timestamp(self, raw) -> datetime:
+        try:
+            if isinstance(raw, (int, float)):
+                return datetime.fromtimestamp(raw, tz=timezone.utc)
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return datetime.now(timezone.utc)
+
+    def _calc_trade_pnl(self, trade: Dict) -> float:
+        """Calculate PnL contribution of a single closed trade."""
+        trade_type = trade.get("type", trade.get("side", "")).upper()
+        price = float(trade.get("price", 0))
+        size = float(trade.get("size", trade.get("shares", 0)))
+        usd = float(trade.get("usdcSize", trade.get("amount", price * size)))
+
+        # SELL або REDEEM = отримали гроші назад
+        # BUY = витратили гроші
+        if trade_type in ("SELL", "REDEEM", "SELL_OUTCOME"):
+            return usd   # отримали
+        elif trade_type in ("BUY", "PURCHASE", "BUY_OUTCOME"):
+            return -usd  # витратили
+        return 0
+
+    async def get_pnl_stats(self, address: str) -> dict:
+        """
+        Повертає PnL за поточний місяць і за весь час.
+        Логіка: сума всіх SELL/REDEEM мінус сума всіх BUY + поточна вартість позицій.
+        """
+        async with aiohttp.ClientSession() as session:
+            all_activity = await self.fetch_all_activity(address, session)
+            positions_raw = await self.fetch_positions(address, session)
+
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        pnl_alltime = 0.0
+        pnl_month = 0.0
+
+        for trade in all_activity:
+            trade_type = trade.get("type", trade.get("side", "")).upper()
+            # Рахуємо тільки закриті угоди (SELL/REDEEM)
+            if trade_type not in ("SELL", "REDEEM", "SELL_OUTCOME", "BUY", "PURCHASE", "BUY_OUTCOME"):
+                continue
+
+            ts_raw = trade.get("timestamp", trade.get("createdAt", trade.get("created_at", "")))
+            trade_dt = self._parse_timestamp(ts_raw)
+            contribution = self._calc_trade_pnl(trade)
+
+            pnl_alltime += contribution
+            if trade_dt >= month_start:
+                pnl_month += contribution
+
+        # Додаємо поточну вартість відкритих позицій
+        open_value = 0.0
+        for pos in positions_raw:
+            size = float(pos.get("size", pos.get("shares", 0)))
+            cur_price = float(pos.get("currentPrice", pos.get("curPrice", 0)))
+            if size > 0.01 and cur_price > 0:
+                open_value += size * cur_price
+
+        pnl_alltime += open_value
+        pnl_month += open_value  # поточні позиції впливають і на місячний PnL
+
+        month_name_ua = {
+            1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень",
+            5: "Травень", 6: "Червень", 7: "Липень", 8: "Серпень",
+            9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"
+        }
+
+        return {
+            "pnl_month": pnl_month,
+            "pnl_alltime": pnl_alltime,
+            "month_name": f"{month_name_ua[now.month]} {now.year}",
+            "open_value": open_value,
+        }
