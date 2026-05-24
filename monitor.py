@@ -290,6 +290,51 @@ class PolymarketMonitor:
         result.sort(key=lambda x: x["pnl"], reverse=True)
         return result
 
+    async def fetch_portfolio_value(self, address: str, session: aiohttp.ClientSession) -> dict:
+        """Fetch total portfolio value including USDC balance."""
+        result = {"total": 0.0, "available": 0.0, "positions_value": 0.0}
+        
+        # Спробуємо різні ендпоінти
+        endpoints = [
+            f"{POLYMARKET_DATA_API}/portfolio?user={address}",
+            f"{POLYMARKET_DATA_API}/value?user={address}",
+            f"{POLYMARKET_GAMMA_API}/portfolio?user={address}",
+        ]
+        
+        for url in endpoints:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        logger.info(f"Portfolio endpoint {url}: {str(data)[:200]}")
+                        
+                        # Пробуємо різні поля
+                        total = float(data.get("portfolioValue", data.get("total", data.get("value", 0))))
+                        available = float(data.get("availableBalance", data.get("available", data.get("usdc", 0))))
+                        positions = float(data.get("positionsValue", data.get("positions", 0)))
+                        
+                        if total > 0:
+                            result = {"total": total, "available": available, "positions_value": positions}
+                            return result
+            except Exception as e:
+                logger.debug(f"Portfolio endpoint {url} failed: {e}")
+                continue
+        
+        # Якщо ендпоінти не спрацювали — рахуємо самі з позицій
+        try:
+            positions_raw = await self.fetch_positions(address, session)
+            pos_value = sum(
+                float(p.get("size", 0)) * float(p.get("currentPrice", p.get("curPrice", 0)))
+                for p in positions_raw
+                if float(p.get("currentPrice", p.get("curPrice", 0))) > 0
+            )
+            result["positions_value"] = pos_value
+        except Exception:
+            pass
+        
+        return result
+
+
     async def fetch_all_activity(self, address: str, session: aiohttp.ClientSession, limit: int = 500) -> List[Dict]:
         """Fetch full activity history for PnL calculation."""
         all_trades = []
@@ -401,9 +446,16 @@ class PolymarketMonitor:
             9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"
         }
 
+        # Пробуємо отримати баланс портфеля
+        async with aiohttp.ClientSession() as session2:
+            portfolio = await self.fetch_portfolio_value(address, session2)
+
         return {
             "pnl_month": pnl_month,
             "pnl_alltime": pnl_alltime,
             "month_name": f"{month_name_ua[now.month]} {now.year}",
             "open_value": open_value,
+            "portfolio_total": portfolio["total"],
+            "portfolio_available": portfolio["available"],
+            "portfolio_positions": portfolio["positions_value"] or open_value,
         }
