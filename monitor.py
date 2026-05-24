@@ -293,34 +293,37 @@ class PolymarketMonitor:
     async def fetch_portfolio_value(self, address: str, session: aiohttp.ClientSession) -> dict:
         """Fetch total portfolio value including USDC balance."""
         result = {"total": 0.0, "available": 0.0, "positions_value": 0.0}
-        
-        # Спробуємо різні ендпоінти
+
         endpoints = [
-            f"{POLYMARKET_DATA_API}/portfolio?user={address}",
-            f"{POLYMARKET_DATA_API}/value?user={address}",
-            f"{POLYMARKET_GAMMA_API}/portfolio?user={address}",
+            f"{POLYMARKET_DATA_API}/users/{address}",
+            f"{POLYMARKET_DATA_API}/profile?user={address}",
+            f"{POLYMARKET_GAMMA_API}/users?address={address}",
+            f"{POLYMARKET_GAMMA_API}/profiles?address={address}",
         ]
-        
+
         for url in endpoints:
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        logger.info(f"Portfolio endpoint {url}: {str(data)[:200]}")
-                        
-                        # Пробуємо різні поля
-                        total = float(data.get("portfolioValue", data.get("total", data.get("value", 0))))
-                        available = float(data.get("availableBalance", data.get("available", data.get("usdc", 0))))
-                        positions = float(data.get("positionsValue", data.get("positions", 0)))
-                        
+                        if isinstance(data, list) and data:
+                            data = data[0]
+                        logger.info(f"Portfolio {url}: {str(data)[:300]}")
+                        total = float(data.get("portfolioValue",
+                                      data.get("portfolio_value",
+                                      data.get("totalValue",
+                                      data.get("total", 0)))))
+                        available = float(data.get("availableBalance",
+                                          data.get("available_balance",
+                                          data.get("cashBalance",
+                                          data.get("usdc", 0)))))
                         if total > 0:
-                            result = {"total": total, "available": available, "positions_value": positions}
+                            result = {"total": total, "available": available, "positions_value": 0.0}
                             return result
             except Exception as e:
-                logger.debug(f"Portfolio endpoint {url} failed: {e}")
-                continue
-        
-        # Якщо ендпоінти не спрацювали — рахуємо самі з позицій
+                logger.debug(f"Portfolio {url} failed: {e}")
+
+        # Fallback — рахуємо з позицій
         try:
             positions_raw = await self.fetch_positions(address, session)
             pos_value = sum(
@@ -331,7 +334,7 @@ class PolymarketMonitor:
             result["positions_value"] = pos_value
         except Exception:
             pass
-        
+
         return result
 
 
