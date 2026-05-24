@@ -290,6 +290,43 @@ class PolymarketMonitor:
         result.sort(key=lambda x: x["pnl"], reverse=True)
         return result
 
+    async def fetch_usdc_balance(self, address: str, session: aiohttp.ClientSession) -> float:
+        """Fetch USDC balance from Polygon blockchain via public RPC."""
+        # USDC contract on Polygon
+        USDC_CONTRACT = "0x2791bca1f2de4661ed88a30c99a7a9449aa84174"
+        # balanceOf(address) function selector
+        data = "0x70a08231000000000000000000000000" + address[2:].lower().zfill(64)
+
+        rpc_endpoints = [
+            "https://polygon-rpc.com",
+            "https://rpc-mainnet.matic.network",
+            "https://rpc.ankr.com/polygon",
+        ]
+
+        for rpc in rpc_endpoints:
+            try:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "method": "eth_call",
+                    "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+                    "id": 1
+                }
+                async with session.post(rpc, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        hex_val = result.get("result", "0x0")
+                        if hex_val and hex_val != "0x":
+                            # USDC has 6 decimals
+                            balance = int(hex_val, 16) / 1_000_000
+                            logger.info(f"USDC balance for {address[:10]}: ${balance:.2f}")
+                            return balance
+            except Exception as e:
+                logger.debug(f"RPC {rpc} failed: {e}")
+                continue
+
+        return 0.0
+
+
     async def fetch_portfolio_value(self, address: str, session: aiohttp.ClientSession) -> dict:
         """Fetch total portfolio value including USDC balance."""
         result = {"total": 0.0, "available": 0.0, "positions_value": 0.0}
@@ -449,16 +486,17 @@ class PolymarketMonitor:
             9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень"
         }
 
-        # Пробуємо отримати баланс портфеля
+        # Баланс USDC з блокчейну + вартість позицій = загальний баланс
         async with aiohttp.ClientSession() as session2:
-            portfolio = await self.fetch_portfolio_value(address, session2)
+            usdc_balance = await self.fetch_usdc_balance(address, session2)
+
+        total_balance = usdc_balance + open_value
 
         return {
             "pnl_month": pnl_month,
             "pnl_alltime": pnl_alltime,
             "month_name": f"{month_name_ua[now.month]} {now.year}",
             "open_value": open_value,
-            "portfolio_total": portfolio["total"],
-            "portfolio_available": portfolio["available"],
-            "portfolio_positions": portfolio["positions_value"] or open_value,
+            "usdc_balance": usdc_balance,
+            "total_balance": total_balance,
         }
