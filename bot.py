@@ -349,17 +349,19 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         a_pnl = pnl_stats["pnl_alltime"]
         m_sign = "+" if m_pnl >= 0 else ""
         a_sign = "+" if a_pnl >= 0 else ""
-        m_arrow = "▲" if m_pnl >= 0 else "▼"
-        a_arrow = "▲" if a_pnl >= 0 else "▼"
-        portfolio_total = pnl_stats.get("portfolio_total", 0)
-        portfolio_available = pnl_stats.get("portfolio_available", 0)
-        if portfolio_total > 0:
+        m_color = "🟢" if m_pnl >= 0 else "🔴"
+        a_color = "🟢" if a_pnl >= 0 else "🔴"
+        total_balance = pnl_stats.get("total_balance", 0)
+        usdc_balance = pnl_stats.get("usdc_balance", 0)
+        open_value = pnl_stats.get("open_value", 0)
+        if total_balance > 0:
             lines.append(f"")
-            lines.append(f"💼 Баланс: *${portfolio_total:.2f}*  |  Вільно: *${portfolio_available:.2f}*")
+            lines.append(f"💼 Баланс: *${total_balance:.2f}*")
+            lines.append(f"   💵 Вільно: ${usdc_balance:.2f}  |  📊 Позиції: ${open_value:.2f}")
         lines.append(f"")
         lines.append(f"📊 *Profit/Loss:*")
-        lines.append(f"{m_arrow} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*")
-        lines.append(f"{a_arrow} За весь час: *{a_sign}${a_pnl:.2f}*")
+        lines.append(f"{m_color} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*")
+        lines.append(f"{a_color} За весь час: *{a_sign}${a_pnl:.2f}*")
 
     lines += [
         f"",
@@ -382,9 +384,10 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
 
         outcome_icon = "✅" if outcome.lower() == "yes" else "❌"
         pnl_icon = "📈" if pnl >= 0 else "📉"
+        pnl_color = "🟢" if pnl >= 0 else "🔴"
         lines.append(f"\n*{i}. {title}*")
         lines.append(f"   {outcome_icon} {outcome}  {avg_price:.3f} → {cur_price:.3f}")
-        lines.append(f"   💵 ${cur_val:.2f}  {pnl_icon} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
+        lines.append(f"   💵 ${cur_val:.2f}  {pnl_color} {pnl_icon} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
         if market_url:
             lines.append(f"   [🔗 Відкрити]({market_url})")
 
