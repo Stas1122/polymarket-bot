@@ -380,10 +380,11 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         p_sign = "+" if pnl >= 0 else ""
         market_url = pos.get("market_url", "")
 
-        pnl_arrow = "▲" if pnl >= 0 else "▼"
+        outcome_icon = "✅" if outcome.lower() == "yes" else "❌"
+        pnl_icon = "📈" if pnl >= 0 else "📉"
         lines.append(f"\n*{i}. {title}*")
-        lines.append(f"   {outcome}  {avg_price:.3f} → {cur_price:.3f}")
-        lines.append(f"   ${cur_val:.2f}  {pnl_arrow} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
+        lines.append(f"   {outcome_icon} {outcome}  {avg_price:.3f} → {cur_price:.3f}")
+        lines.append(f"   💵 ${cur_val:.2f}  {pnl_icon} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
         if market_url:
             lines.append(f"   [🔗 Відкрити]({market_url})")
 
