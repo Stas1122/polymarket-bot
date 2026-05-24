@@ -349,10 +349,17 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         a_pnl = pnl_stats["pnl_alltime"]
         m_sign = "+" if m_pnl >= 0 else ""
         a_sign = "+" if a_pnl >= 0 else ""
-        m_emoji = "🟢" if m_pnl >= 0 else "🔴"
-        a_emoji = "🟢" if a_pnl >= 0 else "🔴"
-        lines.append(f"{m_emoji} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*")
-        lines.append(f"{a_emoji} За весь час: *{a_sign}${a_pnl:.2f}*")
+        m_arrow = "▲" if m_pnl >= 0 else "▼"
+        a_arrow = "▲" if a_pnl >= 0 else "▼"
+        portfolio_total = pnl_stats.get("portfolio_total", 0)
+        portfolio_available = pnl_stats.get("portfolio_available", 0)
+        if portfolio_total > 0:
+            lines.append(f"")
+            lines.append(f"💼 Баланс: *${portfolio_total:.2f}*  |  Вільно: *${portfolio_available:.2f}*")
+        lines.append(f"")
+        lines.append(f"📊 *Profit/Loss:*")
+        lines.append(f"{m_arrow} {pnl_stats['month_name']}: *{m_sign}${m_pnl:.2f}*")
+        lines.append(f"{a_arrow} За весь час: *{a_sign}${a_pnl:.2f}*")
 
     lines += [
         f"",
@@ -373,9 +380,10 @@ async def send_positions_report(bot, chat_id: str, address: str, positions: list
         p_sign = "+" if pnl >= 0 else ""
         market_url = pos.get("market_url", "")
 
+        pnl_arrow = "▲" if pnl >= 0 else "▼"
         lines.append(f"\n*{i}. {title}*")
-        lines.append(f"   📌 {outcome}  {avg_price:.3f} → {cur_price:.3f}")
-        lines.append(f"   💵 ${cur_val:.2f}  {p_emoji} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
+        lines.append(f"   {outcome}  {avg_price:.3f} → {cur_price:.3f}")
+        lines.append(f"   ${cur_val:.2f}  {pnl_arrow} {p_sign}${pnl:.2f} ({p_sign}{pnl_pct:.1f}%)")
         if market_url:
             lines.append(f"   [🔗 Відкрити]({market_url})")
 
