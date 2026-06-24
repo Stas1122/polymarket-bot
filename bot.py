@@ -700,6 +700,19 @@ async def send_metar_notification(bot, chat_id: str, station: str, data: dict):
         logger.error(f"Failed to send METAR notification: {e}")
 
 
+async def run_metar_loop(app):
+    """Окремий цикл для METAR — перевірка кожну хвилину."""
+    logger.info("METAR monitor loop started")
+    while True:
+        try:
+            metar_updates = await metar_monitor.check_updates()
+            for chat_id, station, data in metar_updates:
+                await send_metar_notification(app.bot, chat_id, station, data)
+        except Exception as e:
+            logger.error(f"METAR loop error: {e}")
+        await asyncio.sleep(60)
+
+
 async def run_monitor_loop(app):
     logger.info("Monitor loop started")
     last_hourly = 0
@@ -736,15 +749,6 @@ async def run_monitor_loop(app):
 
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
-
-        # METAR перевірка кожну хвилину
-        if int(asyncio.get_event_loop().time()) % 60 < 30:
-            try:
-                metar_updates = await metar_monitor.check_updates()
-                for chat_id, station, data in metar_updates:
-                    await send_metar_notification(app.bot, chat_id, station, data)
-            except Exception as e:
-                logger.error(f"METAR check error: {e}")
 
         await asyncio.sleep(30)
 
@@ -818,6 +822,7 @@ def main():
     async def post_init(application):
         await run_web_server()
         asyncio.create_task(run_monitor_loop(application))
+        asyncio.create_task(run_metar_loop(application))
 
     app.post_init = post_init
     logger.info("Bot starting...")
