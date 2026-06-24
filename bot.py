@@ -582,9 +582,7 @@ async def metar_stations_command(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = str(update.effective_chat.id)
     stations = metar_monitor.get_stations(chat_id)
 
-    keyboard = [
-        [InlineKeyboardButton("➕ Додати станцію", callback_data="metar_add")],
-    ]
+    keyboard = []
     for s in stations:
         code = s["code"]
         last_time = s.get("last_metar_time", "—")
@@ -598,15 +596,16 @@ async def metar_stations_command(update: Update, context: ContextTypes.DEFAULT_T
         f"✈️ *METAR Станції*\n\n"
         f"Активних: *{active}*\n"
         f"Сповіщення при кожному новому оновленні METAR.\n\n"
+        f"Щоб додати — введи код(и) станції\n"
+        f"Наприклад: `MMMX` або `MMMX ZUUU KSEA`"
     )
-    if not stations:
-        text += "_Станцій немає. Додай через кнопку нижче._"
 
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
     )
+    return WAITING_METAR
 
 
 async def metar_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -775,6 +774,7 @@ def main():
     metar_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("addstation", metar_add_start),
+            CommandHandler("stations", metar_stations_command),
             MessageHandler(filters.Regex("^✈️ Станції$"), metar_stations_command),
         ],
         states={
