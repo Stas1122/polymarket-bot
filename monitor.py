@@ -500,3 +500,172 @@ class PolymarketMonitor:
             "usdc_balance": usdc_balance,
             "total_balance": total_balance,
         }
+
+
+# ============ METAR MONITOR ============
+
+METAR_API = "https://aviationweather.gov/api/data/metar"
+METAR_DATA_FILE = os.path.join(DATA_DIR, "metar_stations.json")
+
+
+class MetarMonitor:
+    def __init__(self):
+        self.stations = {}  # {chat_id: [{code, last_metar_time}]}
+        self._load()
+
+    def _load(self):
+        if os.path.exists(METAR_DATA_FILE):
+            try:
+                with open(METAR_DATA_FILE, "r") as f:
+                    self.stations = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load metar stations: {e}")
+
+    def _save(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(METAR_DATA_FILE, "w") as f:
+                json.dump(self.stations, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save metar stations: {e}")
+
+    def add_station(self, chat_id: str, code: str) -> str:
+        code = code.upper()
+        if chat_id not in self.stations:
+            self.stations[chat_id] = []
+        for s in self.stations[chat_id]:
+            if s["code"] == code:
+                return "exists"
+        self.stations[chat_id].append({
+            "code": code,
+            "last_metar_time": None,
+        })
+        self._save()
+        return "added"
+
+    def remove_station(self, chat_id: str, code: str):
+        code = code.upper()
+        if chat_id in self.stations:
+            self.stations[chat_id] = [
+                s for s in self.stations[chat_id] if s["code"] != code
+            ]
+            self._save()
+
+    def get_stations(self, chat_id: str) -> List[Dict]:
+        return self.stations.get(chat_id, [])
+
+    def get_total_stations(self) -> int:
+        return sum(len(v) for v in self.stations.values())
+
+    def _parse_metar_temp(self, raw: str):
+        import re
+        # Точний формат T01720094
+        t_match = re.search(r'T(\d{4})(\d{4})', raw)
+        if t_match:
+            temp_raw = t_match.group(1)
+            sign = -1 if temp_raw[0] == '1' else 1
+            temp_c = sign * int(temp_raw[1:]) / 10.0
+            temp_f = temp_c * 9/5 + 32
+            return temp_f, temp_c
+        # Стандартний TT/DD
+        import re
+        temp_match = re.search(r'\b(M?\d{2})/(M?\d{2})\b', raw)
+        if temp_match:
+            temp_str = temp_match.group(1)
+            sign = -1 if temp_str.startswith('M') else 1
+            temp_c = sign * int(temp_str.replace('M', ''))
+            temp_f = temp_c * 9/5 + 32
+            return temp_f, temp_c
+        return None
+
+    def _parse_metar_time(self, raw: str) -> str:
+        import re
+        time_match = re.search(r'\d{6}Z', raw)
+        if time_match:
+            t = time_match.group(0)
+            return f"{t[2:4]}:{t[4:6]} UTC"
+        return ""
+
+    async def fetch_metar(self, station: str) -> Dict:
+        station = station.upper()
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = {"ids": station, "format": "raw", "taf": "false", "hours": "1"}
+                async with session.get(METAR_API, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        return None
+                    text = await resp.text()
+                    if not text.strip():
+                        return None
+
+                    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+                    metar_line = None
+                    for line in lines:
+                        upper = line.upper()
+                        if station in upper and (upper.startswith("METAR") or upper.startswith(station)):
+                            metar_line = line
+                            break
+                    if not metar_line:
+                        for line in lines:
+                            if station in line.upper():
+                                metar_line = line
+                                break
+                    if not metar_line:
+                        metar_line = lines[0] if lines else ""
+                    if not metar_line:
+                        return None
+
+                    result = self._parse_metar_temp(metar_line)
+                    if result is None:
+                        return None
+
+                    temp_f, temp_c = result
+                    time_str = self._parse_metar_time(metar_line)
+
+                    return {
+                        "temp_f": temp_f,
+                        "temp_c": temp_c,
+                        "time": time_str,
+                        "raw": metar_line,
+                        "metar_time": time_str,
+                    }
+        except Exception as e:
+            logger.error(f"Error fetching METAR for {station}: {e}")
+            return None
+
+    async def check_updates(self) -> List[Tuple]:
+        """Повертає нові METAR оновлення (кожне нове за часом)."""
+        if not self.stations:
+            return []
+
+        notifications = []
+
+        # Унікальні станції
+        unique = {}
+        for chat_id, station_list in self.stations.items():
+            for s in station_list:
+                code = s["code"]
+                if code not in unique:
+                    unique[code] = []
+                unique[code].append((chat_id, s))
+
+        for code, subscribers in unique.items():
+            data = await self.fetch_metar(code)
+            if not data:
+                await asyncio.sleep(0.3)
+                continue
+
+            new_time = data["metar_time"]
+
+            for chat_id, station_data in subscribers:
+                last_time = station_data.get("last_metar_time")
+
+                # Якщо час оновлення змінився — надсилаємо
+                if last_time != new_time:
+                    notifications.append((chat_id, code, data))
+                    station_data["last_metar_time"] = new_time
+
+            await asyncio.sleep(0.3)
+
+        self._save()
+        return notifications
