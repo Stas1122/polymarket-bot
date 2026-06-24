@@ -598,20 +598,29 @@ class MetarMonitor:
                     if not text.strip():
                         return None
 
-                    lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
-                    metar_line = None
-                    for line in lines:
+                    # Об'єднуємо багаторядкові METAR (MMMX та інші розбивають на 2 рядки)
+                    raw_lines = [l.strip() for l in text.strip().split('\n') if l.strip()]
+                    merged = []
+                    current = ""
+                    for line in raw_lines:
                         upper = line.upper()
-                        if station in upper and (upper.startswith("METAR") or upper.startswith(station)):
+                        if upper.startswith("METAR") or upper.startswith("SPECI"):
+                            if current:
+                                merged.append(current)
+                            current = line
+                        else:
+                            current = (current + " " + line).strip() if current else line
+                    if current:
+                        merged.append(current)
+                    if not merged:
+                        merged = raw_lines
+                    metar_line = ""
+                    for line in merged:
+                        if station.upper() in line.upper():
                             metar_line = line
                             break
                     if not metar_line:
-                        for line in lines:
-                            if station in line.upper():
-                                metar_line = line
-                                break
-                    if not metar_line:
-                        metar_line = lines[0] if lines else ""
+                        metar_line = merged[0] if merged else ""
                     if not metar_line:
                         return None
 
