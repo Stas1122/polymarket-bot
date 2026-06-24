@@ -7,7 +7,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor
+from monitor import PolymarketMonitor, MetarMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,11 +15,13 @@ logger = logging.getLogger(__name__)
 WAITING_ADDRESS = 1
 WAITING_NICKNAME = 2
 WAITING_TYPE = 3
+WAITING_METAR = 4
 
 HOURLY_INTERVAL = 3600
 DAILY_INTERVAL = 86400
 
 monitor = PolymarketMonitor()
+metar_monitor = MetarMonitor()
 pinned_messages = {}
 
 
@@ -27,7 +29,8 @@ def main_keyboard():
     keyboard = [
         [KeyboardButton("💼 Мій портфель"), KeyboardButton("👥 Трейдери")],
         [KeyboardButton("➕ Додати"), KeyboardButton("📋 Список")],
-        [KeyboardButton("📈 Статус"), KeyboardButton("❓ Допомога")],
+        [KeyboardButton("✈️ Станції"), KeyboardButton("📈 Статус")],
+        [KeyboardButton("❓ Допомога")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -503,6 +506,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         await list_command(update, context)
     elif text == "📈 Статус":
         await status_command(update, context)
+    elif text == "✈️ Станції":
+        await metar_stations_command(update, context)
     elif text == "❓ Допомога":
         await help_command(update, context)
 
@@ -538,6 +543,162 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"`{tp}` — {data['count']} шт, ${data['total']:.2f}")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def metar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    data = query.data
+
+    if data == "metar_add":
+        await query.edit_message_text(
+            "✈️ Введи код станції в чат (наприклад `KSEA` або кілька через пробіл `KSEA ZUUU`):",
+            parse_mode="Markdown"
+        )
+        context.user_data["metar_adding"] = True
+
+    elif data.startswith("metar_remove:"):
+        code = data.split(":", 1)[1]
+        metar_monitor.remove_station(chat_id, code)
+        await query.edit_message_text(f"✅ Станцію `{code}` видалено.", parse_mode="Markdown")
+
+    elif data.startswith("metar_info:"):
+        code = data.split(":", 1)[1]
+        metar_data = await metar_monitor.fetch_metar(code)
+        if metar_data:
+            temp_f = metar_data["temp_f"]
+            temp_c = metar_data["temp_c"]
+            time_str = metar_data["time"]
+            await query.edit_message_text(
+                f"✈️ *{code}*\n🌡 {temp_f:.1f}°F ({temp_c:.1f}°C)\n🕐 {time_str}",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.answer("Немає даних для цієї станції")
+
+
+async def metar_stations_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показує список METAR станцій і кнопки управління."""
+    chat_id = str(update.effective_chat.id)
+    stations = metar_monitor.get_stations(chat_id)
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Додати станцію", callback_data="metar_add")],
+    ]
+    for s in stations:
+        code = s["code"]
+        last_time = s.get("last_metar_time", "—")
+        keyboard.append([
+            InlineKeyboardButton(f"✈️ {code} | {last_time}", callback_data=f"metar_info:{code}"),
+            InlineKeyboardButton("🗑", callback_data=f"metar_remove:{code}")
+        ])
+
+    active = len(stations)
+    text = (
+        f"✈️ *METAR Станції*\n\n"
+        f"Активних: *{active}*\n"
+        f"Сповіщення при кожному новому оновленні METAR.\n\n"
+    )
+    if not stations:
+        text += "_Станцій немає. Додай через кнопку нижче._"
+
+    await update.message.reply_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def metar_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Починає додавання METAR станції."""
+    await update.message.reply_text(
+        "✈️ Введи код аеропорту (ICAO):\n\n"
+        "Приклади: `KSEA`, `ZUUU`, `ZGSZ`, `KATL`\n\n"
+        "Можна додати кілька через пробіл: `KSEA ZUUU ZGSZ`\n\n"
+        "або /cancel для скасування",
+        parse_mode="Markdown"
+    )
+    return WAITING_METAR
+
+
+async def metar_receive_stations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отримує і додає METAR станції."""
+    chat_id = str(update.effective_chat.id)
+    raw = update.message.text.strip().upper()
+    codes = [c.strip() for c in raw.split() if c.strip()]
+
+    if not codes:
+        await update.message.reply_text("❌ Введи хоча б один код станції.")
+        return WAITING_METAR
+
+    msg = await update.message.reply_text("⏳ Перевіряю станції...")
+    added = []
+    failed = []
+
+    for code in codes:
+        if len(code) < 3 or len(code) > 5 or not code.isalpha():
+            failed.append(f"{code} (невірний формат)")
+            continue
+
+        data = await metar_monitor.fetch_metar(code)
+        if data is None:
+            failed.append(f"{code} (не знайдено)")
+            continue
+
+        result = metar_monitor.add_station(chat_id, code)
+        if result == "exists":
+            added.append(f"{code} (вже є)")
+        else:
+            temp_f = data["temp_f"]
+            temp_c = data["temp_c"]
+            added.append(f"{code} — {temp_f:.1f}°F ({temp_c:.1f}°C)")
+
+    lines = ["✅ *Результат:*\n"]
+    if added:
+        lines.append("*Додано:*")
+        for a in added:
+            lines.append(f"  ✈️ {a}")
+    if failed:
+        lines.append("\n*Не знайдено:*")
+        for f in failed:
+            lines.append(f"  ❌ {f}")
+
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=main_keyboard()
+    )
+    return ConversationHandler.END
+
+
+async def send_metar_notification(bot, chat_id: str, station: str, data: dict):
+    """Надсилає сповіщення про нове METAR оновлення."""
+    temp_f = data["temp_f"]
+    temp_c = data["temp_c"]
+    time_str = data["time"]
+    raw = data.get("raw", "")
+
+    text = (
+        f"✈️ *{station}* — нове METAR оновлення\n\n"
+        f"🌡 *{temp_f:.1f}°F* ({temp_c:.1f}°C)\n"
+        f"🕐 {time_str}\n\n"
+        f"`{raw[:80]}`"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=int(chat_id),
+            text=text,
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Failed to send METAR notification: {e}")
+
 
 async def run_monitor_loop(app):
     logger.info("Monitor loop started")
@@ -576,6 +737,15 @@ async def run_monitor_loop(app):
         except Exception as e:
             logger.error(f"Monitor loop error: {e}")
 
+        # METAR перевірка кожну хвилину
+        if int(asyncio.get_event_loop().time()) % 60 < 30:
+            try:
+                metar_updates = await metar_monitor.check_updates()
+                for chat_id, station, data in metar_updates:
+                    await send_metar_notification(app.bot, chat_id, station, data)
+            except Exception as e:
+                logger.error(f"METAR check error: {e}")
+
         await asyncio.sleep(30)
 
 
@@ -602,13 +772,27 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    metar_conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("addstation", metar_add_start),
+            MessageHandler(filters.Regex("^✈️ Станції$"), metar_stations_command),
+        ],
+        states={
+            WAITING_METAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, metar_receive_stations)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stations", metar_stations_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(conv_handler)
+    app.add_handler(metar_conv_handler)
     app.add_handler(CallbackQueryHandler(handle_view_positions_callback, pattern="^viewpos:"))
+    app.add_handler(CallbackQueryHandler(metar_callback, pattern="^metar_"))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
