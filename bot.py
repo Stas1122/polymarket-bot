@@ -686,17 +686,20 @@ async def corrections_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     if correction_monitor.is_subscribed(chat_id):
         correction_monitor.unsubscribe(chat_id)
         await update.message.reply_text(
-            "🔕 Відписано від алертів виправлень METAR.\n\n"
-            "Щоб підписатись знову — /corrections",
+            "🔕 *Виправлення — ВИМКНЕНО*\n\n"
+            "Алерти про виправлення METAR не надходитимуть.\n\n"
+            "Натисни ⚠️ Виправлення щоб увімкнути знову.",
+            parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
     else:
         correction_monitor.subscribe(chat_id)
+        from monitor import CORRECTION_WATCH_STATIONS as CWS
         await update.message.reply_text(
-            "✅ Підписано на алерти виправлень METAR!\n\n"
-            f"Моніториться *{len(CORRECTION_WATCH_STATIONS)} станцій* по всьому світу.\n"
+            "✅ *Виправлення — АКТИВНО*\n\n"
+            f"Моніториться *{len(CWS)} станцій* по всьому світу.\n\n"
             "Як тільки METAR виправить температуру — прийде алерт ⚠️\n\n"
-            "Щоб відписатись — /corrections",
+            "Натисни ⚠️ Виправлення ще раз щоб вимкнути.",
             parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
@@ -872,9 +875,13 @@ def main():
             MessageHandler(filters.Regex("^✈️ Станції$"), metar_stations_command),
         ],
         states={
-            WAITING_METAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, metar_receive_stations)],
+            WAITING_METAR: [MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex("^⚠️"), metar_receive_stations)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            MessageHandler(filters.Regex("^⚠️ Виправлення$"), corrections_command),
+            MessageHandler(filters.Regex("^💼|^👥|^➕|^📋|^📈|^❓"), handle_keyboard_buttons),
+        ],
     )
 
     app.add_handler(CommandHandler("start", start))
