@@ -539,6 +539,8 @@ class MetarMonitor:
         self.stations[chat_id].append({
             "code": code,
             "last_metar_time": None,
+            "last_temp_c": None,    # для виявлення виправлень
+            "last_temp_f": None,
         })
         self._save()
         return "added"
@@ -643,7 +645,11 @@ class MetarMonitor:
             return None
 
     async def check_updates(self) -> List[Tuple]:
-        """Повертає нові METAR оновлення (кожне нове за часом)."""
+        """
+        Перевіряє METAR оновлення.
+        Повертає (chat_id, code, data, event_type)
+        event_type: "new" = нові дані, "correction" = виправлення
+        """
         if not self.stations:
             return []
 
@@ -665,14 +671,40 @@ class MetarMonitor:
                 continue
 
             new_time = data["metar_time"]
+            new_temp_c = data["temp_c"]
+            new_temp_f = data["temp_f"]
 
             for chat_id, station_data in subscribers:
                 last_time = station_data.get("last_metar_time")
+                last_temp_c = station_data.get("last_temp_c")
 
-                # Якщо час оновлення змінився — надсилаємо
-                if last_time != new_time:
-                    notifications.append((chat_id, code, data))
+                if last_time is None:
+                    # Перший запуск — просто зберігаємо
                     station_data["last_metar_time"] = new_time
+                    station_data["last_temp_c"] = new_temp_c
+                    station_data["last_temp_f"] = new_temp_f
+                    continue
+
+                if new_time != last_time:
+                    # Новий METAR (час змінився)
+                    notifications.append((chat_id, code, data, "new"))
+                    station_data["last_metar_time"] = new_time
+                    station_data["last_temp_c"] = new_temp_c
+                    station_data["last_temp_f"] = new_temp_f
+
+                elif new_time == last_time and last_temp_c is not None:
+                    # Той самий час — перевіряємо чи змінилась температура
+                    if abs(new_temp_c - last_temp_c) >= 0.5:
+                        # ВИПРАВЛЕННЯ! Той самий час але інша температура
+                        correction_data = {
+                            **data,
+                            "old_temp_c": last_temp_c,
+                            "old_temp_f": station_data.get("last_temp_f", last_temp_c * 9/5 + 32),
+                        }
+                        notifications.append((chat_id, code, correction_data, "correction"))
+                        station_data["last_temp_c"] = new_temp_c
+                        station_data["last_temp_f"] = new_temp_f
+                        logger.info(f"METAR correction detected for {code}: {last_temp_c}°C -> {new_temp_c}°C at {new_time}")
 
             await asyncio.sleep(0.3)
 
