@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor, MetarMonitor
+from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ DAILY_INTERVAL = 86400
 
 monitor = PolymarketMonitor()
 metar_monitor = MetarMonitor()
+correction_monitor = CorrectionMonitor()
 pinned_messages = {}
 
 
@@ -30,8 +31,8 @@ def main_keyboard():
     keyboard = [
         [KeyboardButton("💼 Мій портфель"), KeyboardButton("👥 Трейдери")],
         [KeyboardButton("➕ Додати"), KeyboardButton("📋 Список")],
-        [KeyboardButton("✈️ Станції"), KeyboardButton("📈 Статус")],
-        [KeyboardButton("❓ Допомога")],
+        [KeyboardButton("✈️ Станції"), KeyboardButton("⚠️ Виправлення")],
+        [KeyboardButton("📈 Статус"), KeyboardButton("❓ Допомога")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -509,6 +510,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         await status_command(update, context)
     elif text == "✈️ Станції":
         await metar_stations_command(update, context)
+    elif text == "⚠️ Виправлення":
+        await corrections_command(update, context)
     elif text == "❓ Допомога":
         await help_command(update, context)
 
@@ -676,6 +679,55 @@ async def metar_receive_stations(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+async def corrections_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Підписка/відписка від алертів виправлень METAR."""
+    chat_id = str(update.effective_chat.id)
+
+    if correction_monitor.is_subscribed(chat_id):
+        correction_monitor.unsubscribe(chat_id)
+        await update.message.reply_text(
+            "🔕 Відписано від алертів виправлень METAR.\n\n"
+            "Щоб підписатись знову — /corrections",
+            reply_markup=main_keyboard()
+        )
+    else:
+        correction_monitor.subscribe(chat_id)
+        await update.message.reply_text(
+            "✅ Підписано на алерти виправлень METAR!\n\n"
+            f"Моніториться *{len(CORRECTION_WATCH_STATIONS)} станцій* по всьому світу.\n"
+            "Як тільки METAR виправить температуру — прийде алерт ⚠️\n\n"
+            "Щоб відписатись — /corrections",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+
+
+async def send_correction_alert(bot, chat_id: str, station: str, data: dict):
+    """Надсилає алерт про виправлення METAR з 44 станцій."""
+    old_temp_c = data.get("old_temp_c", 0)
+    old_temp_f = data.get("old_temp_f", 0)
+    new_temp_c = data["temp_c"]
+    new_temp_f = data["temp_f"]
+    time_str = data["time"]
+    raw = data.get("raw", "")
+    diff = new_temp_c - old_temp_c
+    sign = "+" if diff > 0 else ""
+
+    text = (
+        f"⚠️ *{station} — METAR виправлено!*\n\n"
+        f"🕐 Час: {time_str} (той самий)\n"
+        f"📉 Було: *{old_temp_f:.1f}°F* ({old_temp_c:.1f}°C)\n"
+        f"📈 Стало: *{new_temp_f:.1f}°F* ({new_temp_c:.1f}°C)\n"
+        f"Δ {sign}{diff:.1f}°C\n\n"
+        f"💡 Перевір ціни на ринку!\n"
+        f"`{raw[:80]}`"
+    )
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send correction alert: {e}")
+
+
 async def send_metar_notification(bot, chat_id: str, station: str, data: dict, event_type: str = "new"):
     """Надсилає сповіщення про нове METAR оновлення або виправлення."""
     temp_f = data["temp_f"]
@@ -718,11 +770,18 @@ async def send_metar_notification(bot, chat_id: str, station: str, data: dict, e
 async def run_metar_loop(app):
     """Окремий цикл для METAR — перевірка кожну хвилину."""
     logger.info("METAR monitor loop started")
+    # Підписуємо всі чати на correction monitor при старті
     while True:
         try:
+            # 1. Перевірка станцій які користувач додав вручну
             metar_updates = await metar_monitor.check_updates()
             for chat_id, station, data, event_type in metar_updates:
                 await send_metar_notification(app.bot, chat_id, station, data, event_type)
+            # 2. Перевірка виправлень по 44 станціях
+            corrections = await correction_monitor.check_corrections(metar_monitor)
+            for chat_id, station, data in corrections:
+                await send_correction_alert(app.bot, chat_id, station, data)
+
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
         await asyncio.sleep(60)
@@ -820,6 +879,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stations", metar_stations_command))
+    app.add_handler(CommandHandler("corrections", corrections_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
