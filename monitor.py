@@ -735,6 +735,8 @@ class CorrectionMonitor:
         # {chat_id: True} — хто підписаний на алерти виправлень
         self.subscribers_file = os.path.join(DATA_DIR, "correction_subscribers.json")
         self.subscribers = {}
+        self._last_check = None
+        self._total_corrections = 0
         self._load()
 
     def _load(self):
@@ -760,6 +762,15 @@ class CorrectionMonitor:
                 json.dump(self.subscribers, f, indent=2)
         except Exception as e:
             logger.error(f"CorrectionMonitor save error: {e}")
+
+    def get_stats(self) -> dict:
+        """Статистика моніторингу виправлень."""
+        return {
+            "total_stations": len(CORRECTION_WATCH_STATIONS),
+            "checked_stations": len(self.station_data),
+            "last_check": self._last_check,
+            "total_corrections": self._total_corrections,
+        }
 
     def subscribe(self, chat_id: str):
         """Підписати чат на алерти виправлень."""
@@ -833,5 +844,8 @@ class CorrectionMonitor:
 
             await asyncio.sleep(0.2)
 
+        from datetime import datetime, timezone
+        self._last_check = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
+        self._total_corrections += len(notifications)
         self._save()
         return notifications
