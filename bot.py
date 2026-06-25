@@ -676,19 +676,34 @@ async def metar_receive_stations(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
-async def send_metar_notification(bot, chat_id: str, station: str, data: dict):
-    """Надсилає сповіщення про нове METAR оновлення."""
+async def send_metar_notification(bot, chat_id: str, station: str, data: dict, event_type: str = "new"):
+    """Надсилає сповіщення про нове METAR оновлення або виправлення."""
     temp_f = data["temp_f"]
     temp_c = data["temp_c"]
     time_str = data["time"]
     raw = data.get("raw", "")
 
-    text = (
-        f"✈️ *{station}* — нове METAR оновлення\n\n"
-        f"🌡 *{temp_f:.1f}°F* ({temp_c:.1f}°C)\n"
-        f"🕐 {time_str}\n\n"
-        f"`{raw[:80]}`"
-    )
+    if event_type == "correction":
+        old_temp_c = data.get("old_temp_c", 0)
+        old_temp_f = data.get("old_temp_f", 0)
+        diff = temp_c - old_temp_c
+        sign = "+" if diff > 0 else ""
+        text = (
+            f"⚠️ *{station} — METAR виправлено!*\n\n"
+            f"🕐 Час: {time_str} (той самий)\n"
+            f"📉 Було: *{old_temp_f:.1f}°F* ({old_temp_c:.1f}°C)\n"
+            f"📈 Стало: *{temp_f:.1f}°F* ({temp_c:.1f}°C)\n"
+            f"Δ {sign}{diff:.1f}°C\n\n"
+            f"💡 Перевір ціни на ринку!\n"
+            f"`{raw[:80]}`"
+        )
+    else:
+        text = (
+            f"✈️ *{station}* — нове METAR оновлення\n\n"
+            f"🌡 *{temp_f:.1f}°F* ({temp_c:.1f}°C)\n"
+            f"🕐 {time_str}\n\n"
+            f"`{raw[:80]}`"
+        )
 
     try:
         await bot.send_message(
@@ -706,8 +721,8 @@ async def run_metar_loop(app):
     while True:
         try:
             metar_updates = await metar_monitor.check_updates()
-            for chat_id, station, data in metar_updates:
-                await send_metar_notification(app.bot, chat_id, station, data)
+            for chat_id, station, data, event_type in metar_updates:
+                await send_metar_notification(app.bot, chat_id, station, data, event_type)
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
         await asyncio.sleep(60)
