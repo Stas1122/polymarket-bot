@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor
+from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +24,7 @@ DAILY_INTERVAL = 86400
 monitor = PolymarketMonitor()
 metar_monitor = MetarMonitor()
 correction_monitor = CorrectionMonitor()
+peak_monitor = PeakForecastMonitor()
 pinned_messages = {}
 
 
@@ -32,7 +33,8 @@ def main_keyboard():
         [KeyboardButton("💼 Мій портфель"), KeyboardButton("👥 Трейдери")],
         [KeyboardButton("➕ Додати"), KeyboardButton("📋 Список")],
         [KeyboardButton("✈️ Станції"), KeyboardButton("⚠️ Виправлення")],
-        [KeyboardButton("📈 Статус"), KeyboardButton("❓ Допомога")],
+        [KeyboardButton("🌅 Ранній пік"), KeyboardButton("📈 Статус")],
+        [KeyboardButton("❓ Допомога")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -528,6 +530,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         await metar_stations_command(update, context)
     elif text == "⚠️ Виправлення":
         await corrections_command(update, context)
+    elif text == "🌅 Ранній пік":
+        await peak_command(update, context)
     elif text == "❓ Допомога":
         await help_command(update, context)
 
@@ -695,6 +699,28 @@ async def metar_receive_stations(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+async def peak_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Підписка/відписка від алертів раннього піку температури."""
+    chat_id = str(update.effective_chat.id)
+    if peak_monitor.is_subscribed(chat_id):
+        peak_monitor.unsubscribe(chat_id)
+        await update.message.reply_text(
+            "🔕 *Ранній пік — ВИМКНЕНО*\n\nАлерти про ранній пік температури не надходитимуть.",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+    else:
+        peak_monitor.subscribe(chat_id)
+        await update.message.reply_text(
+            "✅ *Ранній пік — АКТИВНО*\n\n"
+            "Алерт приходить за 3-4 години до опівночі місцевого часу\n"
+            "якщо максимум температури очікується в перші 6 годин доби.\n\n"
+            "Натисни 🌅 Ранній пік ще раз щоб вимкнути.",
+            parse_mode="Markdown",
+            reply_markup=main_keyboard()
+        )
+
+
 async def corrections_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Підписка/відписка від алертів виправлень METAR."""
     chat_id = str(update.effective_chat.id)
@@ -719,6 +745,29 @@ async def corrections_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode="Markdown",
             reply_markup=main_keyboard()
         )
+
+
+async def send_peak_alert(bot, chat_id: str, data: dict):
+    """Надсилає алерт про ранній пік температури."""
+    station = data["station"]
+    city = data["city"]
+    date = data["date"]
+    max_temp = data["max_temp"]
+    max_time = data["max_time"]
+    day_max = data["day_max"]
+    max_f = max_temp * 9/5 + 32
+
+    text = (
+        f"🌅 *{station} ({city}) — пік температури на початку доби!*\n\n"
+        f"📅 Дата: {date}\n"
+        f"🌡 Макс: *{max_temp}°C ({max_f:.1f}°F)* о {max_time} місцевого\n"
+        f"📉 Вдень буде: {day_max}°C\n\n"
+        f"💡 Ринки на температуру вище {max_temp}°C виглядають переоціненими!"
+    )
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send peak alert: {e}")
 
 
 async def send_correction_alert(bot, chat_id: str, station: str, data: dict):
@@ -800,6 +849,11 @@ async def run_metar_loop(app):
             corrections = await correction_monitor.check_corrections(metar_monitor)
             for chat_id, station, data in corrections:
                 await send_correction_alert(app.bot, chat_id, station, data)
+
+            # 3. Перевірка раннього піку температури
+            peak_alerts = await peak_monitor.check_forecasts()
+            for chat_id, data in peak_alerts:
+                await send_peak_alert(app.bot, chat_id, data)
 
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
@@ -903,6 +957,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stations", metar_stations_command))
     app.add_handler(CommandHandler("corrections", corrections_command))
+    app.add_handler(CommandHandler("peak", peak_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
