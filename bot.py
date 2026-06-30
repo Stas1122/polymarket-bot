@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor
+from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor, HiddenMaxMonitor, LowConfirmedMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ monitor = PolymarketMonitor()
 metar_monitor = MetarMonitor()
 correction_monitor = CorrectionMonitor()
 peak_monitor = PeakForecastMonitor()
+hidden_max_monitor = HiddenMaxMonitor()
+low_confirmed_monitor = LowConfirmedMonitor()
 pinned_messages = {}
 
 
@@ -32,9 +34,8 @@ def main_keyboard():
     keyboard = [
         [KeyboardButton("💼 Мій портфель"), KeyboardButton("👥 Трейдери")],
         [KeyboardButton("➕ Додати"), KeyboardButton("📋 Список")],
-        [KeyboardButton("✈️ Станції"), KeyboardButton("⚠️ Виправлення")],
-        [KeyboardButton("🌅 Ранній пік"), KeyboardButton("📈 Статус")],
-        [KeyboardButton("❓ Допомога")],
+        [KeyboardButton("✈️ Станції"), KeyboardButton("🔔 Алерти")],
+        [KeyboardButton("📈 Статус"), KeyboardButton("❓ Допомога")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -528,10 +529,8 @@ async def handle_keyboard_buttons(update: Update, context: ContextTypes.DEFAULT_
         await status_command(update, context)
     elif text == "✈️ Станції":
         await metar_stations_command(update, context)
-    elif text == "⚠️ Виправлення":
-        await corrections_command(update, context)
-    elif text == "🌅 Ранній пік":
-        await peak_command(update, context)
+    elif text == "🔔 Алерти":
+        await alerts_command(update, context)
     elif text == "❓ Допомога":
         await help_command(update, context)
 
@@ -770,6 +769,166 @@ async def send_peak_alert(bot, chat_id: str, data: dict):
         logger.error(f"Failed to send peak alert: {e}")
 
 
+async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Керування всіма алертами — одна кнопка."""
+    chat_id = str(update.effective_chat.id)
+
+    # Перевіряємо статус кожного алерту
+    is_corr = correction_monitor.is_subscribed(chat_id)
+    is_peak = peak_monitor.is_subscribed(chat_id)
+    is_hidden = hidden_max_monitor.is_subscribed(chat_id)
+    is_low = low_confirmed_monitor.is_subscribed(chat_id)
+
+    all_on = all([is_corr, is_peak, is_hidden, is_low])
+
+    def status(v): return "🟢" if v else "🔴"
+
+    keyboard = [
+        [InlineKeyboardButton(
+            f"{status(is_corr)} Виправлення METAR",
+            callback_data="alert_toggle:correction"
+        )],
+        [InlineKeyboardButton(
+            f"{status(is_peak)} Ранній пік",
+            callback_data="alert_toggle:peak"
+        )],
+        [InlineKeyboardButton(
+            f"{status(is_hidden)} Hidden Max (1XXXX)",
+            callback_data="alert_toggle:hidden"
+        )],
+        [InlineKeyboardButton(
+            f"{status(is_low)} Low Confirmed",
+            callback_data="alert_toggle:low"
+        )],
+        [InlineKeyboardButton(
+            "✅ Увімкнути всі" if not all_on else "🔕 Вимкнути всі",
+            callback_data="alert_toggle:all"
+        )],
+    ]
+
+    await update.message.reply_text(
+        "🔔 *Керування алертами*\n\n"
+        "Натисни щоб увімкнути/вимкнути:\n\n"
+        "⚠️ *Виправлення METAR* — зміна даних заднім числом\n"
+        "🌅 *Ранній пік* — макс температури вночі/вранці\n"
+        "⚡️ *Hidden Max* — прихований макс з поля 1XXXX\n"
+        "📉 *Low Confirmed* — підтвердження мінімуму + ріст",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def alert_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє натискання кнопок алертів."""
+    query = update.callback_query
+    await query.answer()
+    chat_id = str(query.message.chat_id)
+    action = query.data.split(":")[1]
+
+    def toggle(monitor_obj):
+        if monitor_obj.is_subscribed(chat_id):
+            monitor_obj.unsubscribe(chat_id)
+        else:
+            monitor_obj.subscribe(chat_id)
+
+    if action == "correction":
+        toggle(correction_monitor)
+    elif action == "peak":
+        toggle(peak_monitor)
+    elif action == "hidden":
+        toggle(hidden_max_monitor)
+    elif action == "low":
+        toggle(low_confirmed_monitor)
+    elif action == "all":
+        all_on = all([
+            correction_monitor.is_subscribed(chat_id),
+            peak_monitor.is_subscribed(chat_id),
+            hidden_max_monitor.is_subscribed(chat_id),
+            low_confirmed_monitor.is_subscribed(chat_id),
+        ])
+        for m in [correction_monitor, peak_monitor, hidden_max_monitor, low_confirmed_monitor]:
+            if all_on:
+                m.unsubscribe(chat_id)
+            else:
+                m.subscribe(chat_id)
+
+    # Оновлюємо повідомлення
+    is_corr = correction_monitor.is_subscribed(chat_id)
+    is_peak = peak_monitor.is_subscribed(chat_id)
+    is_hidden = hidden_max_monitor.is_subscribed(chat_id)
+    is_low = low_confirmed_monitor.is_subscribed(chat_id)
+    all_on = all([is_corr, is_peak, is_hidden, is_low])
+
+    def status(v): return "🟢" if v else "🔴"
+
+    keyboard = [
+        [InlineKeyboardButton(f"{status(is_corr)} Виправлення METAR", callback_data="alert_toggle:correction")],
+        [InlineKeyboardButton(f"{status(is_peak)} Ранній пік", callback_data="alert_toggle:peak")],
+        [InlineKeyboardButton(f"{status(is_hidden)} Hidden Max (1XXXX)", callback_data="alert_toggle:hidden")],
+        [InlineKeyboardButton(f"{status(is_low)} Low Confirmed", callback_data="alert_toggle:low")],
+        [InlineKeyboardButton(
+            "✅ Увімкнути всі" if not all_on else "🔕 Вимкнути всі",
+            callback_data="alert_toggle:all"
+        )],
+    ]
+
+    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def send_hidden_max_alert(bot, chat_id: str, data: dict):
+    """Надсилає Hidden Max алерт."""
+    station = data["station"]
+    cur_c = data["current_temp_c"]
+    cur_f = data["current_temp_f"]
+    max_c = data["hidden_max_c"]
+    max_f = data["hidden_max_f"]
+    diff_c = data["diff_c"]
+    diff_f = data["diff_f"]
+    metar_time = data["metar_time"]
+
+    text = (
+        f"⚡️ *HIDDEN MAX ALERT*\n\n"
+        f"📍 Станція: *{station}*\n"
+        f"🌡 Поточна: *{cur_f:.1f}°F* ({cur_c:.1f}°C)\n"
+        f"📈 Прихований макс: *{max_f:.1f}°F* ({max_c:.1f}°C)\n"
+        f"📊 Різниця: *+{diff_f:.1f}°F* (+{diff_c:.1f}°C)\n"
+        f"🕐 Час METAR: {metar_time}\n\n"
+        f"⚠️ Перевір ринок — максимум вже був!"
+    )
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send hidden max alert: {e}")
+
+
+async def send_low_confirmed_alert(bot, chat_id: str, data: dict):
+    """Надсилає Low Confirmed алерт."""
+    station = data["station"]
+    p_c = data["plateau_temp_c"]
+    p_f = data["plateau_temp_f"]
+    count = data["plateau_count"]
+    hours = data["plateau_hours"]
+    new_c = data["new_temp_c"]
+    new_f = data["new_temp_f"]
+    rise_c = data["rise_c"]
+    rise_f = rise_c * 9/5
+    time_str = data["metar_time"]
+
+    text = (
+        f"📉 *LOW CONFIRMED ALERT*\n\n"
+        f"📍 Станція: *{station}*\n"
+        f"🌡 Мінімум: *{p_f:.1f}°F* ({p_c:.1f}°C)\n"
+        f"   тримався {count} METAR (~{hours:.1f} год)\n"
+        f"📈 Перший ріст: *{new_f:.1f}°F* ({new_c:.1f}°C) о {time_str}\n"
+        f"📊 Ріст: +{rise_f:.1f}°F (+{rise_c:.1f}°C)\n\n"
+        f"✅ Мінімум підтверджено — заходь Yes {p_c:.0f}°C!"
+    )
+    try:
+        await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Failed to send low confirmed alert: {e}")
+
+
 async def send_correction_alert(bot, chat_id: str, station: str, data: dict):
     """Надсилає алерт про виправлення METAR з 44 станцій."""
     old_temp_c = data.get("old_temp_c", 0)
@@ -854,6 +1013,16 @@ async def run_metar_loop(app):
             peak_alerts = await peak_monitor.check_forecasts()
             for chat_id, data in peak_alerts:
                 await send_peak_alert(app.bot, chat_id, data)
+
+            # 4. Hidden Max алерти
+            hidden_alerts = await hidden_max_monitor.check_hidden_max(metar_monitor)
+            for chat_id, data in hidden_alerts:
+                await send_hidden_max_alert(app.bot, chat_id, data)
+
+            # 5. Low Confirmed алерти
+            low_alerts = await low_confirmed_monitor.check_low_confirmed(metar_monitor)
+            for chat_id, data in low_alerts:
+                await send_low_confirmed_alert(app.bot, chat_id, data)
 
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
@@ -956,8 +1125,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("stations", metar_stations_command))
-    app.add_handler(CommandHandler("corrections", corrections_command))
-    app.add_handler(CommandHandler("peak", peak_command))
+    app.add_handler(CommandHandler("alerts", alerts_command))
     app.add_handler(CommandHandler("debug", debug_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("list", list_command))
@@ -965,6 +1133,7 @@ def main():
     app.add_handler(conv_handler)
     app.add_handler(metar_conv_handler)
     app.add_handler(CallbackQueryHandler(handle_view_positions_callback, pattern="^viewpos:"))
+    app.add_handler(CallbackQueryHandler(alert_toggle_callback, pattern="^alert_toggle:"))
     app.add_handler(CallbackQueryHandler(metar_callback, pattern="^metar_"))
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(
