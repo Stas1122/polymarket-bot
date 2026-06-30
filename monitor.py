@@ -506,6 +506,17 @@ class PolymarketMonitor:
 
 METAR_API = "https://aviationweather.gov/api/data/metar"
 
+# Станції для алертів Hidden Max і Low Confirmed
+ALERT_WATCH_STATIONS = [
+    "ZSPD",  # Шанхай
+    "RKSI",  # Сеул
+    "RJTT",  # Токіо (Ханеда) - додаємо
+    "KLGA",  # Нью-Йорк
+    "KMIA",  # Маямі
+    "LFPB",  # Париж
+    "EGLC",  # Лондон
+]
+
 # Станції для моніторингу виправлень (без сповіщень про кожне оновлення)
 CORRECTION_WATCH_STATIONS = [
     "NZWN", "WSSS", "EGLC", "RCSS", "RKSI", "ZUCK", "ZSQD", "WMKK",
@@ -1029,6 +1040,300 @@ class PeakForecastMonitor:
                     logger.error(f"Peak forecast error for {code}: {e}")
 
                 await asyncio.sleep(0.3)
+
+        self._save()
+        return notifications
+
+
+# ============ HIDDEN MAX MONITOR ============
+
+class HiddenMaxMonitor:
+    """
+    Моніторить поле 1XXXX в METAR — максимум за 6 годин.
+    Публікується тільки о 00:53 / 06:53 / 12:53 / 18:53 UTC.
+    Надсилає алерт якщо прихований максимум > поточна температура + 1°C.
+    """
+
+    def __init__(self):
+        self.data_file = os.path.join(DATA_DIR, "hidden_max.json")
+        # {station: last_metar_hash} — для уникнення дублювання
+        self.seen_alerts = {}
+        self.subscribers = {}
+        self.subscribers_file = os.path.join(DATA_DIR, "hidden_max_subscribers.json")
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r") as f:
+                    self.seen_alerts = json.load(f)
+            except Exception:
+                self.seen_alerts = {}
+        if os.path.exists(self.subscribers_file):
+            try:
+                with open(self.subscribers_file, "r") as f:
+                    self.subscribers = json.load(f)
+            except Exception:
+                self.subscribers = {}
+
+    def _save(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(self.data_file, "w") as f:
+                json.dump(self.seen_alerts, f, indent=2)
+            with open(self.subscribers_file, "w") as f:
+                json.dump(self.subscribers, f, indent=2)
+        except Exception as e:
+            logger.error(f"HiddenMaxMonitor save error: {e}")
+
+    def subscribe(self, chat_id: str):
+        self.subscribers[chat_id] = True
+        self._save()
+
+    def unsubscribe(self, chat_id: str):
+        self.subscribers.pop(chat_id, None)
+        self._save()
+
+    def is_subscribed(self, chat_id: str) -> bool:
+        return self.subscribers.get(chat_id, False)
+
+    def parse_hidden_max(self, raw: str) -> float:
+        """
+        Парсить поле 1XXXX з raw METAR.
+        1XXXX = максимум за 6 годин
+        Перший знак після 1: 0 = плюс, 1 = мінус
+        """
+        import re
+        match = re.search(r'\b1(\d{4})\b', raw)
+        if match:
+            value = match.group(1)
+            sign = -1 if value[0] == '1' else 1
+            temp = sign * int(value[1:]) / 10.0
+            return temp
+        return None
+
+    def _make_alert_key(self, station: str, metar_time: str, max_temp: float) -> str:
+        return f"{station}_{metar_time}_{max_temp}"
+
+    async def check_hidden_max(self, metar_instance) -> List[Tuple]:
+        """
+        Перевіряє всі 44 станції на наявність прихованого максимуму.
+        """
+        if not self.subscribers:
+            return []
+
+        notifications = []
+
+        for code in ALERT_WATCH_STATIONS:
+            data = await metar_instance.fetch_metar(code)
+            if not data:
+                await asyncio.sleep(0.2)
+                continue
+
+            raw = data.get("raw", "")
+            current_temp_c = data["temp_c"]
+            current_temp_f = data["temp_f"]
+            metar_time = data["metar_time"]
+
+            # Парсимо прихований максимум
+            hidden_max_c = self.parse_hidden_max(raw)
+            if hidden_max_c is None:
+                await asyncio.sleep(0.2)
+                continue
+
+            # Перевіряємо умову
+            diff = hidden_max_c - current_temp_c
+            if diff <= 1.0:
+                await asyncio.sleep(0.2)
+                continue
+
+            # Перевіряємо чи вже надсилали алерт для цього запису
+            alert_key = self._make_alert_key(code, metar_time, hidden_max_c)
+            if self.seen_alerts.get(code) == alert_key:
+                await asyncio.sleep(0.2)
+                continue
+
+            # Новий алерт!
+            hidden_max_f = hidden_max_c * 9/5 + 32
+            diff_f = hidden_max_f - current_temp_f
+
+            alert_data = {
+                "station": code,
+                "current_temp_c": current_temp_c,
+                "current_temp_f": current_temp_f,
+                "hidden_max_c": hidden_max_c,
+                "hidden_max_f": hidden_max_f,
+                "diff_c": diff,
+                "diff_f": diff_f,
+                "metar_time": metar_time,
+            }
+
+            for chat_id in self.subscribers:
+                notifications.append((chat_id, alert_data))
+
+            self.seen_alerts[code] = alert_key
+            logger.info(f"Hidden max alert for {code}: current={current_temp_c}°C hidden={hidden_max_c}°C diff={diff:.1f}°C")
+
+            await asyncio.sleep(0.2)
+
+        self._save()
+        return notifications
+
+
+# ============ LOW CONFIRMED MONITOR ============
+
+class LowConfirmedMonitor:
+    """
+    Стратегія "Confirmed Low + Rising":
+    1. Температура тримається стабільною 3+ METAR поспіль (±0.5°C) — плато
+    2. Наступний METAR показує ріст ≥1°C — мінімум підтверджено
+    3. → Алерт: можна заходити на Yes [мінімум]
+
+    Перевіряє тільки ALERT_WATCH_STATIONS.
+    """
+
+    def __init__(self):
+        self.data_file = os.path.join(DATA_DIR, "low_confirmed.json")
+        self.subscribers_file = os.path.join(DATA_DIR, "low_confirmed_subscribers.json")
+        # {station: {"temps": [t1,t2,t3], "plateau_temp": float, "plateau_count": int, "alerted": bool}}
+        self.station_history = {}
+        self.subscribers = {}
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r") as f:
+                    self.station_history = json.load(f)
+            except Exception:
+                self.station_history = {}
+        if os.path.exists(self.subscribers_file):
+            try:
+                with open(self.subscribers_file, "r") as f:
+                    self.subscribers = json.load(f)
+            except Exception:
+                self.subscribers = {}
+
+    def _save(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(self.data_file, "w") as f:
+                json.dump(self.station_history, f, indent=2)
+            with open(self.subscribers_file, "w") as f:
+                json.dump(self.subscribers, f, indent=2)
+        except Exception as e:
+            logger.error(f"LowConfirmedMonitor save error: {e}")
+
+    def subscribe(self, chat_id: str):
+        self.subscribers[chat_id] = True
+        self._save()
+
+    def unsubscribe(self, chat_id: str):
+        self.subscribers.pop(chat_id, None)
+        self._save()
+
+    def is_subscribed(self, chat_id: str) -> bool:
+        return self.subscribers.get(chat_id, False)
+
+    async def check_low_confirmed(self, metar_instance) -> List[Tuple]:
+        if not self.subscribers:
+            return []
+
+        notifications = []
+        PLATEAU_MIN = 3      # мінімум METAR для плато
+        PLATEAU_TOLERANCE = 0.5  # ±0.5°C для плато
+        RISE_THRESHOLD = 1.0     # мінімальний ріст для підтвердження
+
+        for code in ALERT_WATCH_STATIONS:
+            data = await metar_instance.fetch_metar(code)
+            if not data:
+                await asyncio.sleep(0.2)
+                continue
+
+            new_temp_c = data["temp_c"]
+            new_temp_f = data["temp_f"]
+            metar_time = data["metar_time"]
+
+            if code not in self.station_history:
+                self.station_history[code] = {
+                    "temps": [new_temp_c],
+                    "times": [metar_time],
+                    "plateau_temp": new_temp_c,
+                    "plateau_count": 1,
+                    "alerted_for": None,
+                }
+                await asyncio.sleep(0.2)
+                continue
+
+            hist = self.station_history[code]
+            last_temps = hist.get("temps", [])
+            last_time = hist.get("times", [])
+            plateau_temp = hist.get("plateau_temp", new_temp_c)
+            plateau_count = hist.get("plateau_count", 0)
+            alerted_for = hist.get("alerted_for")
+
+            # Пропускаємо якщо той самий METAR
+            if last_time and last_time[-1] == metar_time:
+                await asyncio.sleep(0.2)
+                continue
+
+            # Перевіряємо чи нова температура продовжує плато
+            if abs(new_temp_c - plateau_temp) <= PLATEAU_TOLERANCE:
+                # Плато продовжується
+                plateau_count += 1
+                hist["plateau_count"] = plateau_count
+                hist["temps"].append(new_temp_c)
+                hist["times"].append(metar_time)
+                # Зберігаємо мінімальне значення плато
+                if new_temp_c < plateau_temp:
+                    hist["plateau_temp"] = new_temp_c
+                    plateau_temp = new_temp_c
+
+            elif new_temp_c > plateau_temp + RISE_THRESHOLD:
+                # РІСТ! Перевіряємо чи було достатнє плато
+                if plateau_count >= PLATEAU_MIN:
+                    alert_key = f"{plateau_temp}_{metar_time}"
+                    if alerted_for != alert_key:
+                        # Надсилаємо алерт!
+                        plateau_temp_f = plateau_temp * 9/5 + 32
+                        hours = plateau_count * 0.5  # ~30 хв між METAR
+
+                        alert_data = {
+                            "station": code,
+                            "plateau_temp_c": plateau_temp,
+                            "plateau_temp_f": plateau_temp_f,
+                            "plateau_count": plateau_count,
+                            "plateau_hours": hours,
+                            "new_temp_c": new_temp_c,
+                            "new_temp_f": new_temp_f,
+                            "rise_c": new_temp_c - plateau_temp,
+                            "metar_time": metar_time,
+                        }
+
+                        for chat_id in self.subscribers:
+                            notifications.append((chat_id, alert_data))
+
+                        hist["alerted_for"] = alert_key
+                        logger.info(f"Low confirmed for {code}: plateau={plateau_temp}°C rise to {new_temp_c}°C")
+
+                # Скидаємо плато — починаємо нове
+                hist["plateau_temp"] = new_temp_c
+                hist["plateau_count"] = 1
+                hist["temps"] = [new_temp_c]
+                hist["times"] = [metar_time]
+
+            else:
+                # Падіння — скидаємо плато
+                hist["plateau_temp"] = new_temp_c
+                hist["plateau_count"] = 1
+                hist["temps"] = [new_temp_c]
+                hist["times"] = [metar_time]
+
+            # Тримаємо тільки останні 10 записів
+            hist["temps"] = hist["temps"][-10:]
+            hist["times"] = hist["times"][-10:]
+
+            await asyncio.sleep(0.2)
 
         self._save()
         return notifications
