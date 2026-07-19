@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor, HiddenMaxMonitor, LowConfirmedMonitor, MetarWuSpikeMonitor
+from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor, HiddenMaxMonitor, LowConfirmedMonitor, WuStationMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ correction_monitor = CorrectionMonitor()
 peak_monitor = PeakForecastMonitor()
 hidden_max_monitor = HiddenMaxMonitor()
 low_confirmed_monitor = LowConfirmedMonitor()
-wu_spike_monitor = MetarWuSpikeMonitor()
+wu_station_monitor = WuStationMonitor()
 pinned_messages = {}
 
 
@@ -814,7 +814,7 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌅 *Ранній пік* — макс температури вночі/вранці\n"
         "⚡️ *Hidden Max* — прихований макс з поля 1XXXX\n"
         "📉 *Low Confirmed* — підтвердження мінімуму + ріст\n"
-        "🔥 *METAR/WU Spike* — розбіжність між METAR і Wunderground",
+        "📡 *WU Station* — кожне оновлення WU станції (ZGSZ)",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -841,17 +841,17 @@ async def alert_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         toggle(hidden_max_monitor)
     elif action == "low":
         toggle(low_confirmed_monitor)
-    elif action == "wu_spike":
-        toggle(wu_spike_monitor)
+    elif action == "wu_station":
+        toggle(wu_station_monitor)
     elif action == "all":
         all_on = all([
             correction_monitor.is_subscribed(chat_id),
             peak_monitor.is_subscribed(chat_id),
             hidden_max_monitor.is_subscribed(chat_id),
             low_confirmed_monitor.is_subscribed(chat_id),
-            wu_spike_monitor.is_subscribed(chat_id),
+            wu_station_monitor.is_subscribed(chat_id),
         ])
-        for m in [correction_monitor, peak_monitor, hidden_max_monitor, low_confirmed_monitor, wu_spike_monitor]:
+        for m in [correction_monitor, peak_monitor, hidden_max_monitor, low_confirmed_monitor, wu_station_monitor]:
             if all_on:
                 m.unsubscribe(chat_id)
             else:
@@ -871,7 +871,7 @@ async def alert_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton(f"{status(is_peak)} Ранній пік", callback_data="alert_toggle:peak")],
         [InlineKeyboardButton(f"{status(is_hidden)} Hidden Max (1XXXX)", callback_data="alert_toggle:hidden")],
         [InlineKeyboardButton(f"{status(is_low)} Low Confirmed", callback_data="alert_toggle:low")],
-        [InlineKeyboardButton(f"{status(wu_spike_monitor.is_subscribed(chat_id))} METAR/WU Spike", callback_data="alert_toggle:wu_spike")],
+        [InlineKeyboardButton(f"{status(wu_station_monitor.is_subscribed(chat_id))} WU Station (ZGSZ)", callback_data="alert_toggle:wu_station")],
         [InlineKeyboardButton(
             "✅ Увімкнути всі" if not all_on else "🔕 Вимкнути всі",
             callback_data="alert_toggle:all"
@@ -907,37 +907,34 @@ async def send_hidden_max_alert(bot, chat_id: str, data: dict):
         logger.error(f"Failed to send hidden max alert: {e}")
 
 
-async def send_wu_spike_alert(bot, chat_id: str, data: dict):
-    """Надсилає METAR/WU Spike алерт."""
-    station = data["station"]
-    metar_temp = data["metar_temp"]
-    metar_time = data["metar_time"]
-    wu_temp = data["wu_temp"]
-    wu_local = data["wu_local_time"]
-    alert_type = data["type"]
+async def send_wu_station_alert(bot, chat_id: str, data: dict):
+    """Надсилає WU Station оновлення."""
+    icao = data["icao"]
+    name = data["name"]
+    temp = data["temp"]
+    time_utc = data["time_utc"]
+    time_local = data["time_local"]
+    prev_temp = data.get("prev_temp")
 
-    if alert_type == "WU_LAG":
-        age_min = data["wu_age_min"]
-        text = (
-            f"⏳ *WU ВІДСТАЄ — {station}*\n\n"
-            f"🌡 METAR: *{metar_temp}°C* | {metar_time}\n"
-            f"📉 WU: {wu_temp}°C | {wu_local} ({age_min} хв тому)\n\n"
-            f"⚠️ WU не оновлювався понад 15 хв!"
-        )
-    else:
-        diff = data["diff"]
+    temp_f = temp * 9/5 + 32
+
+    change = ""
+    if prev_temp is not None and prev_temp != temp:
+        diff = temp - prev_temp
         sign = "+" if diff > 0 else ""
-        text = (
-            f"🔥 *METAR/WU SPIKE — {station}*\n\n"
-            f"🌡 METAR: *{metar_temp}°C* | {metar_time}\n"
-            f"📉 WU: *{wu_temp}°C* | {wu_local}\n"
-            f"📊 Різниця: *{sign}{diff}°C*\n\n"
-            f"⚠️ Перевір ринок — є розбіжність!"
-        )
+        change = f"\n📊 Зміна: {sign}{diff}°C"
+
+    text = (
+        f"📡 *WU — {icao}*\n"
+        f"📍 {name}\n\n"
+        f"🌡 *{temp}°C ({temp_f:.1f}°F)*\n"
+        f"🕐 {time_utc} | {time_local}"
+        f"{change}"
+    )
     try:
         await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Failed to send WU spike alert: {e}")
+        logger.error(f"Failed to send WU station alert: {e}")
 
 
 async def send_low_confirmed_alert(bot, chat_id: str, data: dict):
@@ -1063,10 +1060,10 @@ async def run_metar_loop(app):
             for chat_id, data in low_alerts:
                 await send_low_confirmed_alert(app.bot, chat_id, data)
 
-            # 6. METAR/WU Spike алерти
-            wu_alerts = await wu_spike_monitor.check_spikes(metar_monitor)
-            for chat_id, data in wu_alerts:
-                await send_wu_spike_alert(app.bot, chat_id, data)
+            # 6. WU Station оновлення
+            wu_updates = await wu_station_monitor.check_updates()
+            for chat_id, data in wu_updates:
+                await send_wu_station_alert(app.bot, chat_id, data)
 
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
