@@ -506,11 +506,21 @@ class PolymarketMonitor:
 
 METAR_API = "https://aviationweather.gov/api/data/metar"
 
-# Станції для алертів Hidden Max і Low Confirmed
+# Станції для Hidden Max — всі 44
 ALERT_WATCH_STATIONS = [
+    "NZWN", "WSSS", "EGLC", "RCSS", "RKSI", "ZUCK", "ZSQD", "WMKK",
+    "EFHK", "ZSPD", "ZGGG", "VILK", "EHAM", "LFPB", "LTAC", "FACT",
+    "EDDM", "RKPK", "LEMD", "ZGSZ", "LTFM", "KMIA", "ZUUU", "EPWA",
+    "SBGR", "LLBG", "ZBAA", "LIMC", "OPKC", "KAUS", "OEJN", "KORD",
+    "KLGA", "CYYZ", "SAEZ", "KATL", "KLAX", "KSFO", "KBKF", "ZHHH",
+    "KHOU", "MPMG", "KSEA", "MMMX"
+]
+
+# Станції для Low Confirmed — тільки ті де є активні ринки
+LOW_CONFIRMED_STATIONS = [
     "ZSPD",  # Шанхай
     "RKSI",  # Сеул
-    "RJTT",  # Токіо (Ханеда) - додаємо
+    "RJTT",  # Токіо
     "KLGA",  # Нью-Йорк
     "KMIA",  # Маямі
     "LFPB",  # Париж
@@ -1244,7 +1254,7 @@ class LowConfirmedMonitor:
         PLATEAU_TOLERANCE = 0.5  # ±0.5°C для плато
         RISE_THRESHOLD = 1.0     # мінімальний ріст для підтвердження
 
-        for code in ALERT_WATCH_STATIONS:
+        for code in LOW_CONFIRMED_STATIONS:
             data = await metar_instance.fetch_metar(code)
             if not data:
                 await asyncio.sleep(0.2)
