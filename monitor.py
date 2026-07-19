@@ -1347,3 +1347,240 @@ class LowConfirmedMonitor:
 
         self._save()
         return notifications
+
+
+# ============ METAR/WU SPIKE MONITOR ============
+
+WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+WU_API_URL = "https://api.weather.com/v1/location/{icao}:9:{cc}/observations/historical.json"
+
+# Некамериканські станції: ICAO → (country_code, timezone)
+WU_STATIONS = {
+    "NZWN": ("NZ", "Pacific/Auckland"),
+    "WSSS": ("SG", "Asia/Singapore"),
+    "EGLC": ("GB", "Europe/London"),
+    "RCSS": ("TW", "Asia/Taipei"),
+    "RKSI": ("KR", "Asia/Seoul"),
+    "ZUCK": ("CN", "Asia/Shanghai"),
+    "ZSQD": ("CN", "Asia/Shanghai"),
+    "WMKK": ("MY", "Asia/Kuala_Lumpur"),
+    "EFHK": ("FI", "Europe/Helsinki"),
+    "ZSPD": ("CN", "Asia/Shanghai"),
+    "ZGGG": ("CN", "Asia/Shanghai"),
+    "VILK": ("IN", "Asia/Kolkata"),
+    "EHAM": ("NL", "Europe/Amsterdam"),
+    "LFPB": ("FR", "Europe/Paris"),
+    "LTAC": ("TR", "Europe/Istanbul"),
+    "FACT": ("ZA", "Africa/Johannesburg"),
+    "EDDM": ("DE", "Europe/Berlin"),
+    "RKPK": ("KR", "Asia/Seoul"),
+    "LEMD": ("ES", "Europe/Madrid"),
+    "ZGSZ": ("CN", "Asia/Shanghai"),
+    "LTFM": ("TR", "Europe/Istanbul"),
+    "ZUUU": ("CN", "Asia/Shanghai"),
+    "EPWA": ("PL", "Europe/Warsaw"),
+    "SBGR": ("BR", "America/Sao_Paulo"),
+    "LLBG": ("IL", "Asia/Jerusalem"),
+    "ZBAA": ("CN", "Asia/Shanghai"),
+    "LIMC": ("IT", "Europe/Rome"),
+    "OPKC": ("PK", "Asia/Karachi"),
+    "OEJN": ("SA", "Asia/Riyadh"),
+    "SAEZ": ("AR", "America/Argentina/Buenos_Aires"),
+    "ZHHH": ("CN", "Asia/Shanghai"),
+    "MPMG": ("PA", "America/Panama"),
+}
+
+
+class MetarWuSpikeMonitor:
+    """
+    Порівнює METAR і WU температури для некамериканських станцій.
+    
+    Два алерти:
+    1. РОЗБІЖНІСТЬ — будь-яка різниця між METAR і WU за однаковий час
+    2. WU ВІДСТАЄ — якщо WU не оновлювався >15 хв після нового METAR
+    """
+
+    def __init__(self):
+        self.data_file = os.path.join(DATA_DIR, "wu_spike.json")
+        self.subscribers_file = os.path.join(DATA_DIR, "wu_spike_subscribers.json")
+        # {station: {metar_time_utc, metar_temp, wu_time_utc, wu_temp, alerted_key}}
+        self.station_data = {}
+        self.subscribers = {}
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            try:
+                with open(self.data_file, "r") as f:
+                    self.station_data = json.load(f)
+            except Exception:
+                self.station_data = {}
+        if os.path.exists(self.subscribers_file):
+            try:
+                with open(self.subscribers_file, "r") as f:
+                    self.subscribers = json.load(f)
+            except Exception:
+                self.subscribers = {}
+
+    def _save(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(self.data_file, "w") as f:
+                json.dump(self.station_data, f, indent=2)
+            with open(self.subscribers_file, "w") as f:
+                json.dump(self.subscribers, f, indent=2)
+        except Exception as e:
+            logger.error(f"MetarWuSpikeMonitor save error: {e}")
+
+    def subscribe(self, chat_id: str):
+        self.subscribers[chat_id] = True
+        self._save()
+
+    def unsubscribe(self, chat_id: str):
+        self.subscribers.pop(chat_id, None)
+        self._save()
+
+    def is_subscribed(self, chat_id: str) -> bool:
+        return self.subscribers.get(chat_id, False)
+
+    async def fetch_wu_latest(self, icao: str, cc: str, session: aiohttp.ClientSession) -> dict:
+        """Отримує останнє спостереження WU для станції."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        url = WU_API_URL.format(icao=icao, cc=cc)
+        params = {
+            "apiKey": WU_API_KEY,
+            "units": "m",
+            "startDate": today,
+        }
+        try:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    observations = data.get("observations", [])
+                    if observations:
+                        # Беремо найновіше спостереження
+                        latest = max(observations, key=lambda x: x.get("valid_time_gmt", 0))
+                        return {
+                            "temp": latest.get("temp"),
+                            "valid_time_gmt": latest.get("valid_time_gmt"),
+                            "obs_name": latest.get("obs_name", ""),
+                        }
+                else:
+                    logger.debug(f"WU API {resp.status} for {icao}")
+        except Exception as e:
+            logger.debug(f"WU fetch error for {icao}: {e}")
+        return {}
+
+    def _format_local_time(self, epoch_utc: int, tz_str: str) -> str:
+        """Конвертує epoch UTC в місцевий час."""
+        try:
+            import pytz
+            from datetime import datetime
+            dt = datetime.fromtimestamp(epoch_utc, tz=pytz.timezone(tz_str))
+            return dt.strftime("%H:%M місц.")
+        except Exception:
+            from datetime import datetime, timezone
+            dt = datetime.fromtimestamp(epoch_utc, tz=timezone.utc)
+            return dt.strftime("%H:%M UTC")
+
+    async def check_spikes(self, metar_instance) -> List[Tuple]:
+        """
+        Перевіряє всі WU_STATIONS на розбіжності з METAR.
+        """
+        if not self.subscribers:
+            return []
+
+        from datetime import datetime, timezone as tz
+        notifications = []
+        now_epoch = int(datetime.now(tz.utc).timestamp())
+        WU_LAG_THRESHOLD = 15 * 60  # 15 хвилин в секундах
+
+        async with aiohttp.ClientSession() as session:
+            for icao, (cc, timezone_str) in WU_STATIONS.items():
+
+                # 1. Отримуємо поточний METAR
+                metar_data = await metar_instance.fetch_metar(icao)
+                if not metar_data:
+                    await asyncio.sleep(0.3)
+                    continue
+
+                metar_temp = metar_data["temp_c"]
+                metar_time_str = metar_data["metar_time"]
+                metar_raw = metar_data.get("raw", "")
+
+                # Парсимо epoch з metar_time (формат "HH:MM UTC")
+                # Для порівняння беремо поточний epoch як час METAR
+                metar_epoch = now_epoch
+
+                # 2. Отримуємо WU дані
+                wu_data = await self.fetch_wu_latest(icao, cc, session)
+
+                if icao not in self.station_data:
+                    self.station_data[icao] = {}
+
+                stored = self.station_data[icao]
+                wu_temp = wu_data.get("temp")
+                wu_epoch = wu_data.get("valid_time_gmt", 0)
+
+                # Генеруємо ключ для уникнення дублювання
+                alert_key = f"{metar_time_str}_{wu_epoch}"
+
+                if stored.get("alerted_key") == alert_key:
+                    await asyncio.sleep(0.3)
+                    continue
+
+                alert_data = None
+
+                if not wu_data or wu_temp is None:
+                    # WU не відповів — пропускаємо
+                    await asyncio.sleep(0.3)
+                    continue
+
+                wu_local_time = self._format_local_time(wu_epoch, timezone_str)
+                wu_age = now_epoch - wu_epoch
+
+                if wu_age > WU_LAG_THRESHOLD:
+                    # WU відстає більше 15 хвилин
+                    wu_age_min = wu_age // 60
+                    alert_data = {
+                        "type": "WU_LAG",
+                        "station": icao,
+                        "metar_temp": metar_temp,
+                        "metar_time": metar_time_str,
+                        "wu_temp": wu_temp,
+                        "wu_local_time": wu_local_time,
+                        "wu_age_min": wu_age_min,
+                    }
+
+                elif wu_temp != metar_temp:
+                    # Розбіжність температур
+                    diff = metar_temp - wu_temp
+                    alert_data = {
+                        "type": "SPIKE",
+                        "station": icao,
+                        "metar_temp": metar_temp,
+                        "metar_time": metar_time_str,
+                        "wu_temp": wu_temp,
+                        "wu_local_time": wu_local_time,
+                        "diff": diff,
+                    }
+
+                if alert_data:
+                    for chat_id in self.subscribers:
+                        notifications.append((chat_id, alert_data))
+                    self.station_data[icao]["alerted_key"] = alert_key
+                    logger.info(f"WU Spike alert for {icao}: METAR={metar_temp}°C WU={wu_temp}°C")
+
+                # Зберігаємо поточний стан
+                self.station_data[icao].update({
+                    "metar_temp": metar_temp,
+                    "metar_time": metar_time_str,
+                    "wu_temp": wu_temp,
+                    "wu_epoch": wu_epoch,
+                })
+
+                await asyncio.sleep(0.5)  # Rate limit
+
+        self._save()
+        return notifications
