@@ -8,7 +8,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor, HiddenMaxMonitor, LowConfirmedMonitor, WuStationMonitor
+from monitor import PolymarketMonitor, MetarMonitor, CorrectionMonitor, PeakForecastMonitor, HiddenMaxMonitor, LowConfirmedMonitor, OrderFlowMonitor
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ correction_monitor = CorrectionMonitor()
 peak_monitor = PeakForecastMonitor()
 hidden_max_monitor = HiddenMaxMonitor()
 low_confirmed_monitor = LowConfirmedMonitor()
-wu_station_monitor = WuStationMonitor()
+order_flow_monitor = OrderFlowMonitor()
 pinned_messages = {}
 
 
@@ -814,7 +814,7 @@ async def alerts_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌅 *Ранній пік* — макс температури вночі/вранці\n"
         "⚡️ *Hidden Max* — прихований макс з поля 1XXXX\n"
         "📉 *Low Confirmed* — підтвердження мінімуму + ріст\n"
-        "📡 *WU Station* — кожне оновлення WU станції (ZGSZ)",
+        "⚡️ *Order Flow* — різкий ріст ціни на сусідній поріг",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -841,17 +841,17 @@ async def alert_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         toggle(hidden_max_monitor)
     elif action == "low":
         toggle(low_confirmed_monitor)
-    elif action == "wu_station":
-        toggle(wu_station_monitor)
+    elif action == "order_flow":
+        toggle(order_flow_monitor)
     elif action == "all":
         all_on = all([
             correction_monitor.is_subscribed(chat_id),
             peak_monitor.is_subscribed(chat_id),
             hidden_max_monitor.is_subscribed(chat_id),
             low_confirmed_monitor.is_subscribed(chat_id),
-            wu_station_monitor.is_subscribed(chat_id),
+            order_flow_monitor.is_subscribed(chat_id),
         ])
-        for m in [correction_monitor, peak_monitor, hidden_max_monitor, low_confirmed_monitor, wu_station_monitor]:
+        for m in [correction_monitor, peak_monitor, hidden_max_monitor, low_confirmed_monitor, order_flow_monitor]:
             if all_on:
                 m.unsubscribe(chat_id)
             else:
@@ -871,7 +871,7 @@ async def alert_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton(f"{status(is_peak)} Ранній пік", callback_data="alert_toggle:peak")],
         [InlineKeyboardButton(f"{status(is_hidden)} Hidden Max (1XXXX)", callback_data="alert_toggle:hidden")],
         [InlineKeyboardButton(f"{status(is_low)} Low Confirmed", callback_data="alert_toggle:low")],
-        [InlineKeyboardButton(f"{status(wu_station_monitor.is_subscribed(chat_id))} WU Station (ZGSZ)", callback_data="alert_toggle:wu_station")],
+        [InlineKeyboardButton(f"{status(order_flow_monitor.is_subscribed(chat_id))} Order Flow", callback_data="alert_toggle:order_flow")],
         [InlineKeyboardButton(
             "✅ Увімкнути всі" if not all_on else "🔕 Вимкнути всі",
             callback_data="alert_toggle:all"
@@ -907,34 +907,30 @@ async def send_hidden_max_alert(bot, chat_id: str, data: dict):
         logger.error(f"Failed to send hidden max alert: {e}")
 
 
-async def send_wu_station_alert(bot, chat_id: str, data: dict):
-    """Надсилає WU Station оновлення."""
-    icao = data["icao"]
-    name = data["name"]
-    temp = data["temp"]
-    time_utc = data["time_utc"]
-    time_local = data["time_local"]
-    prev_temp = data.get("prev_temp")
-
-    temp_f = temp * 9/5 + 32
-
-    change = ""
-    if prev_temp is not None and prev_temp != temp:
-        diff = temp - prev_temp
-        sign = "+" if diff > 0 else ""
-        change = f"\n📊 Зміна: {sign}{diff}°C"
+async def send_order_flow_alert(bot, chat_id: str, data: dict):
+    """Надсилає Order Flow алерт."""
+    market_title = data["market_title"]
+    station = data["station"]
+    dominant_outcome = data["dominant_outcome"]
+    dominant_price = data["dominant_price"]
+    neighbor_outcome = data["neighbor_outcome"]
+    min_price = data["min_price"]
+    curr_price = data["curr_price"]
+    rise = data["rise"]
+    time_str = data["time"]
 
     text = (
-        f"📡 *WU — {icao}*\n"
-        f"📍 {name}\n\n"
-        f"🌡 *{temp}°C ({temp_f:.1f}°F)*\n"
-        f"🕐 {time_utc} | {time_local}"
-        f"{change}"
+        f"⚡️ *ORDER FLOW ALERT*\n\n"
+        f"📍 {station} — {market_title}\n\n"
+        f"🌡 Консенсус: *{dominant_outcome} = {dominant_price:.0f}¢*\n"
+        f"📈 Рух: *{neighbor_outcome}* = {min_price:.0f}¢ → *{curr_price:.0f}¢* (+{rise:.0f}¢)\n\n"
+        f"⏰ {time_str}\n\n"
+        f"→ Можлива зміна температури!"
     )
     try:
         await bot.send_message(chat_id=int(chat_id), text=text, parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Failed to send WU station alert: {e}")
+        logger.error(f"Failed to send order flow alert: {e}")
 
 
 async def send_low_confirmed_alert(bot, chat_id: str, data: dict):
@@ -1060,10 +1056,10 @@ async def run_metar_loop(app):
             for chat_id, data in low_alerts:
                 await send_low_confirmed_alert(app.bot, chat_id, data)
 
-            # 6. WU Station оновлення
-            wu_updates = await wu_station_monitor.check_updates()
-            for chat_id, data in wu_updates:
-                await send_wu_station_alert(app.bot, chat_id, data)
+            # 6. Order Flow алерти
+            order_alerts = await order_flow_monitor.check_markets()
+            for chat_id, data in order_alerts:
+                await send_order_flow_alert(app.bot, chat_id, data)
 
         except Exception as e:
             logger.error(f"METAR loop error: {e}")
