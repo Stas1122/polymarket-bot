@@ -1351,73 +1351,46 @@ class LowConfirmedMonitor:
 
 
 
-# ============ ORDER FLOW MONITOR ============
 
-POLYMARKET_GAMMA_API_URL = "https://gamma-api.polymarket.com"
-POLYMARKET_CLOB_API_URL = "https://clob.polymarket.com"
+# ============ NEIGHBORHOOD MONITOR ============
 
-# Прив'язка назв міст до ICAO станцій
-CITY_TO_STATION = {
-    "wellington": "NZWN",
-    "singapore": "WSSS",
-    "london": "EGLC",
-    "taipei": "RCSS",
-    "seoul": "RKSI",
-    "chongqing": "ZUCK",
-    "qingdao": "ZSQD",
-    "kuala lumpur": "WMKK",
-    "helsinki": "EFHK",
-    "shanghai": "ZSPD",
-    "guangzhou": "ZGGG",
-    "lucknow": "VILK",
-    "amsterdam": "EHAM",
-    "paris": "LFPB",
-    "ankara": "LTAC",
-    "cape town": "FACT",
-    "munich": "EDDM",
-    "busan": "RKPK",
-    "madrid": "LEMD",
-    "shenzhen": "ZGSZ",
-    "istanbul": "LTFM",
-    "miami": "KMIA",
-    "chengdu": "ZUUU",
-    "warsaw": "EPWA",
-    "sao paulo": "SBGR",
-    "tel aviv": "LLBG",
-    "beijing": "ZBAA",
-    "milan": "LIMC",
-    "karachi": "OPKC",
-    "austin": "KAUS",
-    "jeddah": "OEJN",
-    "chicago": "KORD",
-    "new york": "KLGA",
-    "toronto": "CYYZ",
-    "buenos aires": "SAEZ",
-    "atlanta": "KATL",
-    "los angeles": "KLAX",
-    "san francisco": "KSFO",
-    "denver": "KBKF",
-    "wuhan": "ZHHH",
-    "houston": "KHOU",
-    "panama": "MPMG",
-    "seattle": "KSEA",
-    "mexico city": "MMMX",
-    "incheon": "RKSI",
+WU_API_KEY_NBR = "e1f10a1e78da46f5b10a1e78da96f525"
+
+# Групи станцій: основна + сусідні PWS
+NEIGHBORHOOD_GROUPS = {
+    "EGLC": {
+        "name": "Лондон",
+        "airport": {"icao": "EGLC", "cc": "GB", "label": "EGLC (аеропорт)"},
+        "pws": [
+            {"id": "ILONDO672",  "cc": "GB", "label": "Woolwich #1"},
+            {"id": "ILONDO1011", "cc": "GB", "label": "Woolwich #2"},
+        ],
+    },
+    "SAEZ": {
+        "name": "Буенос-Айрес",
+        "airport": {"icao": "SAEZ", "cc": "AR", "label": "SAEZ (аеропорт)"},
+        "pws": [
+            {"id": "IEZEIZ1",       "cc": "AR", "label": "Ezeiza #1"},
+            {"id": "IEZEIZ7",       "cc": "AR", "label": "Jose Maria Ezeiza"},
+            {"id": "ILAUNI59",      "cc": "AR", "label": "La Union"},
+            {"id": "IBUENOSA487",   "cc": "AR", "label": "Barrio Parque La Celia"},
+        ],
+    },
 }
 
 
-class OrderFlowMonitor:
+class NeighborhoodMonitor:
     """
-    Моніторить погодні ринки Polymarket.
-    Алерт коли сусідній поріг виріс на 10¢+ за годину
-    з мінімуму ≤25¢ при домінуючому >75¢.
+    Моніторить приватні PWS станції навколо аеропортів.
+    Надсилає зведене повідомлення при кожному новому оновленні
+    будь-якої з сусідніх станцій.
     """
 
     def __init__(self):
-        self.data_file = os.path.join(DATA_DIR, "order_flow.json")
-        self.subscribers_file = os.path.join(DATA_DIR, "order_flow_subscribers.json")
-        # {market_id: {outcome: {prices: [(timestamp, price)], alerted_at: timestamp}}}
-        self.market_data = {}
+        self.data_file = os.path.join(DATA_DIR, "neighborhood.json")
+        self.subscribers_file = os.path.join(DATA_DIR, "neighborhood_subscribers.json")
+        # {group_key: {station_id: {last_time, last_temp}}}
+        self.station_data = {}
         self.subscribers = {}
         self._load()
 
@@ -1425,9 +1398,9 @@ class OrderFlowMonitor:
         if os.path.exists(self.data_file):
             try:
                 with open(self.data_file, "r") as f:
-                    self.market_data = json.load(f)
+                    self.station_data = json.load(f)
             except Exception:
-                self.market_data = {}
+                self.station_data = {}
         if os.path.exists(self.subscribers_file):
             try:
                 with open(self.subscribers_file, "r") as f:
@@ -1439,11 +1412,11 @@ class OrderFlowMonitor:
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(self.data_file, "w") as f:
-                json.dump(self.market_data, f, indent=2)
+                json.dump(self.station_data, f, indent=2)
             with open(self.subscribers_file, "w") as f:
                 json.dump(self.subscribers, f, indent=2)
         except Exception as e:
-            logger.error(f"OrderFlowMonitor save error: {e}")
+            logger.error(f"NeighborhoodMonitor save error: {e}")
 
     def subscribe(self, chat_id: str):
         self.subscribers[chat_id] = True
@@ -1456,181 +1429,129 @@ class OrderFlowMonitor:
     def is_subscribed(self, chat_id: str) -> bool:
         return self.subscribers.get(chat_id, False)
 
-    def _get_station_from_title(self, title: str) -> str:
-        """Визначає ICAO станцію з назви ринку."""
-        title_lower = title.lower()
-        for city, icao in CITY_TO_STATION.items():
-            if city in title_lower:
-                return icao
-        return ""
-
-    async def fetch_temperature_markets(self, session: aiohttp.ClientSession) -> List[Dict]:
-        """Отримує активні ринки температури на сьогодні."""
+    async def fetch_pws(self, pws_id: str, cc: str, session: aiohttp.ClientSession) -> dict:
+        """Отримує останнє спостереження PWS станції."""
         from datetime import datetime, timezone
-        today = datetime.now(timezone.utc)
-        month_names = {
-            1: "january", 2: "february", 3: "march", 4: "april",
-            5: "may", 6: "june", 7: "july", 8: "august",
-            9: "september", 10: "october", 11: "november", 12: "december"
-        }
-        month = month_names[today.month]
-        day = today.day
-        search_str = f"highest temperature"
-
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        url = f"https://api.weather.com/v1/location/{pws_id}:9:{cc}/observations/historical.json"
+        params = {"apiKey": WU_API_KEY_NBR, "units": "m", "startDate": today}
         try:
-            url = f"{POLYMARKET_GAMMA_API_URL}/markets"
-            params = {
-                "active": "true",
-                "closed": "false",
-                "limit": 100,
-                "q": search_str,
-            }
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status == 200:
-                    markets = await resp.json()
-                    # Фільтруємо по сьогоднішній даті
-                    today_str = f"{month} {day}"
-                    filtered = [
-                        m for m in markets
-                        if today_str in m.get("question", "").lower()
-                        or today_str in m.get("title", "").lower()
-                    ]
-                    logger.info(f"Found {len(filtered)} temperature markets for today")
-                    return filtered
-        except Exception as e:
-            logger.error(f"Error fetching markets: {e}")
-        return []
-
-    async def fetch_market_prices(self, market_id: str, session: aiohttp.ClientSession) -> List[Dict]:
-        """Отримує поточні ціни по всіх outcomes ринку."""
-        try:
-            url = f"{POLYMARKET_CLOB_API_URL}/markets/{market_id}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    tokens = data.get("tokens", [])
-                    prices = []
-                    for token in tokens:
-                        outcome = token.get("outcome", "")
-                        price = float(token.get("price", 0)) * 100  # конвертуємо в центи
-                        token_id = token.get("token_id", "")
-                        prices.append({
-                            "outcome": outcome,
-                            "price_cents": price,
-                            "token_id": token_id,
-                        })
-                    return prices
+                    obs = data.get("observations", [])
+                    if obs:
+                        latest = max(obs, key=lambda x: x.get("valid_time_gmt", 0))
+                        return {
+                            "temp": latest.get("temp"),
+                            "valid_time_gmt": latest.get("valid_time_gmt", 0),
+                        }
         except Exception as e:
-            logger.debug(f"Error fetching prices for {market_id}: {e}")
-        return []
+            logger.debug(f"PWS fetch error {pws_id}: {e}")
+        return {}
 
-    async def check_markets(self) -> List[Tuple]:
-        """Перевіряє всі погодні ринки на order flow сигнали."""
+    async def fetch_airport_metar(self, icao: str, metar_instance) -> dict:
+        """Отримує поточну температуру аеропорту через METAR."""
+        data = await metar_instance.fetch_metar(icao)
+        if data:
+            return {
+                "temp": data["temp_c"],
+                "time": data["metar_time"],
+            }
+        return {}
+
+    def _trend_arrow(self, curr_temp, prev_temp) -> str:
+        if prev_temp is None:
+            return "→"
+        diff = curr_temp - prev_temp
+        if diff >= 1:
+            return f"🔺 +{diff:.0f}°C"
+        elif diff <= -1:
+            return f"🔻 {diff:.0f}°C"
+        return "→"
+
+    async def check_updates(self, metar_instance) -> List[Tuple]:
+        """Перевіряє всі групи на нові оновлення."""
         if not self.subscribers:
             return []
 
         from datetime import datetime, timezone
         notifications = []
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        ONE_HOUR = 3600
-        ALERT_COOLDOWN = 1800  # 30 хвилин
-
-        DOMINANT_THRESHOLD = 75   # домінуючий > 75¢
-        NEIGHBOR_MAX = 25         # сусідній починав ≤ 25¢
-        MIN_RISE = 10             # ріст мінімум 10¢
 
         async with aiohttp.ClientSession() as session:
-            markets = await self.fetch_temperature_markets(session)
+            for group_key, group in NEIGHBORHOOD_GROUPS.items():
+                if group_key not in self.station_data:
+                    self.station_data[group_key] = {}
 
-            for market in markets:
-                market_id = market.get("id", market.get("conditionId", ""))
-                title = market.get("question", market.get("title", ""))
-                station = self._get_station_from_title(title)
+                group_data = self.station_data[group_key]
+                has_update = False
+                pws_results = []
 
-                if not market_id:
-                    continue
+                # Перевіряємо всі PWS станції
+                for pws in group["pws"]:
+                    pws_id = pws["id"]
+                    label = pws["label"]
 
-                # Отримуємо поточні ціни
-                prices = await self.fetch_market_prices(market_id, session)
-                if not prices:
+                    data = await self.fetch_pws(pws_id, pws["cc"], session)
                     await asyncio.sleep(0.3)
-                    continue
 
-                # Знаходимо домінуючий поріг
-                dominant = max(prices, key=lambda x: x["price_cents"])
-                if dominant["price_cents"] < DOMINANT_THRESHOLD:
-                    await asyncio.sleep(0.3)
-                    continue
-
-                # Ініціалізуємо дані ринку
-                if market_id not in self.market_data:
-                    self.market_data[market_id] = {}
-
-                # Перевіряємо сусідні пороги
-                for p in prices:
-                    if p["outcome"] == dominant["outcome"]:
+                    if not data or data.get("temp") is None:
+                        # Немає даних — показуємо останнє відоме
+                        stored = group_data.get(pws_id, {})
+                        pws_results.append({
+                            "label": label,
+                            "temp": stored.get("last_temp"),
+                            "trend": "—",
+                            "updated": False,
+                        })
                         continue
 
-                    outcome = p["outcome"]
-                    curr_price = p["price_cents"]
+                    new_temp = data["temp"]
+                    new_time = data["valid_time_gmt"]
+                    stored = group_data.get(pws_id, {})
+                    last_time = stored.get("last_time")
+                    last_temp = stored.get("last_temp")
 
-                    # Ініціалізуємо історію
-                    if outcome not in self.market_data[market_id]:
-                        self.market_data[market_id][outcome] = {
-                            "prices": [[now_ts, curr_price]],
-                            "alerted_at": 0,
+                    trend = self._trend_arrow(new_temp, last_temp)
+                    updated = new_time != last_time
+
+                    if updated:
+                        has_update = True
+                        group_data[pws_id] = {
+                            "last_time": new_time,
+                            "last_temp": new_temp,
                         }
-                        continue
 
-                    hist = self.market_data[market_id][outcome]
+                    pws_results.append({
+                        "label": label,
+                        "temp": new_temp,
+                        "trend": trend,
+                        "updated": updated,
+                    })
 
-                    # Додаємо поточну ціну
-                    hist["prices"].append([now_ts, curr_price])
-                    # Тримаємо тільки останню годину
-                    hist["prices"] = [
-                        [ts, pr] for ts, pr in hist["prices"]
-                        if now_ts - ts <= ONE_HOUR
-                    ]
+                # Якщо є оновлення — отримуємо METAR і надсилаємо зведення
+                if has_update:
+                    airport = group["airport"]
+                    airport_data = await self.fetch_airport_metar(
+                        airport["icao"], metar_instance
+                    )
 
-                    # Знаходимо мінімум за останню годину
-                    if len(hist["prices"]) < 2:
-                        continue
+                    now_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
 
-                    min_price = min(pr for _, pr in hist["prices"])
-
-                    # Перевіряємо умови
-                    if min_price > NEIGHBOR_MAX:
-                        continue
-
-                    rise = curr_price - min_price
-                    if rise < MIN_RISE:
-                        continue
-
-                    # Cooldown
-                    if now_ts - hist.get("alerted_at", 0) < ALERT_COOLDOWN:
-                        continue
-
-                    # АЛЕРТ!
-                    time_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
                     alert_data = {
-                        "market_title": title,
-                        "station": station or "—",
-                        "dominant_outcome": dominant["outcome"],
-                        "dominant_price": dominant["price_cents"],
-                        "neighbor_outcome": outcome,
-                        "min_price": min_price,
-                        "curr_price": curr_price,
-                        "rise": rise,
-                        "time": time_str,
+                        "group_key": group_key,
+                        "city": group["name"],
+                        "pws_results": pws_results,
+                        "airport_label": airport["label"],
+                        "airport_temp": airport_data.get("temp"),
+                        "airport_time": airport_data.get("time", "—"),
+                        "time": now_str,
                     }
 
                     for chat_id in self.subscribers:
                         notifications.append((chat_id, alert_data))
 
-                    hist["alerted_at"] = now_ts
-                    logger.info(f"Order flow alert: {title} | {outcome} {min_price:.0f}¢→{curr_price:.0f}¢")
-
-                await asyncio.sleep(0.5)
+                    logger.info(f"Neighborhood update for {group_key}: {len(pws_results)} PWS stations")
 
         self._save()
         return notifications
